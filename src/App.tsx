@@ -17,6 +17,7 @@ import {
   Music,
   Star,
 } from "lucide-react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -45,11 +46,6 @@ function App() {
   const [activePlaylist, setActivePlaylist] = useState<string | null>(null);
   const [playlistItems, setPlaylistItems] = useState<string[]>([]);
   const [newPlaylistName, setNewPlaylistName] = useState("");
-  const [contextMenu, setContextMenu] = useState<{
-    x: number;
-    y: number;
-    filePath: string;
-  } | null>(null);
 
   const { play, stop, currentlyPlaying } = useAudioPreview();
   const searchTimeoutRef = useRef<number | null>(null);
@@ -163,7 +159,6 @@ function App() {
       const items = await api.getPlaylistItems(playlistId);
       setPlaylistItems(items);
     }
-    setContextMenu(null);
   }, [activePlaylist]);
 
   const handleRemoveFromPlaylist = useCallback(async (filePath: string) => {
@@ -173,17 +168,6 @@ function App() {
     setPlaylistItems(items);
   }, [activePlaylist]);
 
-  const handleContextMenu = useCallback((e: React.MouseEvent, filePath: string) => {
-    e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY, filePath });
-  }, []);
-
-  // Close context menu on click elsewhere
-  useEffect(() => {
-    const handler = () => setContextMenu(null);
-    window.addEventListener("click", handler);
-    return () => window.removeEventListener("click", handler);
-  }, []);
 
   // Keyboard shortcut: focus search with Ctrl+K
   useEffect(() => {
@@ -474,7 +458,6 @@ function App() {
                 }`}
                 onMouseEnter={() => play(result.path)}
                 onMouseLeave={() => stop()}
-                onContextMenu={(e) => handleContextMenu(e, result.path)}
               >
                 {/* Play indicator */}
                 <div className="w-4 shrink-0">
@@ -523,16 +506,38 @@ function App() {
                     <ExternalLink className="w-3.5 h-3.5" />
                   </button>
                   {playlists.length > 0 && (
-                    <button
-                      className="p-1 rounded hover:bg-secondary text-muted-foreground hover:text-foreground"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleContextMenu(e, result.path);
-                      }}
-                      title="Add to list"
-                    >
-                      <ListPlus className="w-3.5 h-3.5" />
-                    </button>
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger asChild>
+                        <button
+                          className="p-1 rounded hover:bg-secondary text-muted-foreground hover:text-foreground"
+                          onClick={(e) => e.stopPropagation()}
+                          title="Add to list"
+                        >
+                          <ListPlus className="w-3.5 h-3.5" />
+                        </button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.Content
+                          className="bg-popover border border-border rounded-md shadow-lg py-1 z-50 min-w-40"
+                          sideOffset={4}
+                          align="end"
+                        >
+                          <div className="px-3 py-1 text-xs text-muted-foreground font-medium">
+                            Add to list
+                          </div>
+                          {playlists.map((pl) => (
+                            <DropdownMenu.Item
+                              key={pl.id}
+                              className="w-full px-3 py-1.5 text-left text-sm hover:bg-accent flex items-center gap-2 cursor-pointer outline-none data-highlighted:bg-accent"
+                              onSelect={() => handleAddToPlaylist(pl.id, result.path)}
+                            >
+                              <Music className="w-3 h-3" />
+                              {pl.name}
+                            </DropdownMenu.Item>
+                          ))}
+                        </DropdownMenu.Content>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
                   )}
                 </div>
               </div>
@@ -541,31 +546,6 @@ function App() {
         </ScrollArea>
       </div>
 
-      {/* Context menu */}
-      {contextMenu && playlists.length > 0 && (
-        <div
-          className="fixed bg-popover border border-border rounded-md shadow-lg py-1 z-50 min-w-[160px]"
-          style={{
-            left: Math.min(contextMenu.x, window.innerWidth - 200),
-            top: Math.min(contextMenu.y, window.innerHeight - (playlists.length * 32 + 40)),
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="px-3 py-1 text-xs text-muted-foreground font-medium">
-            Add to list
-          </div>
-          {playlists.map((pl) => (
-            <button
-              key={pl.id}
-              className="w-full px-3 py-1.5 text-left text-sm hover:bg-accent flex items-center gap-2"
-              onClick={() => handleAddToPlaylist(pl.id, contextMenu.filePath)}
-            >
-              <Music className="w-3 h-3" />
-              {pl.name}
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
