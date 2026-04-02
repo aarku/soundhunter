@@ -8,86 +8,90 @@ export function useAudioPreview() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const timeoutRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
+  const currentPathRef = useRef<string | null>(null);
   const [currentlyPlaying, setCurrentlyPlaying] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
 
-  const stopProgressLoop = useCallback(() => {
+  const stopRaf = useCallback(() => {
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-    setProgress(0);
   }, []);
 
-  const startProgressLoop = useCallback(() => {
+  const startRaf = useCallback(() => {
+    stopRaf();
     const tick = () => {
       const audio = audioRef.current;
-      if (audio && audio.duration && !audio.paused) {
+      if (audio && audio.duration > 0 && !audio.paused) {
         setProgress(audio.currentTime / audio.duration);
-        rafRef.current = requestAnimationFrame(tick);
       }
+      rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, []);
+  }, [stopRaf]);
 
   const stop = useCallback(() => {
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
       timeoutRef.current = null;
     }
-    stopProgressLoop();
+    stopRaf();
+    setProgress(0);
+    currentPathRef.current = null;
     if (audioRef.current) {
+      audioRef.current.onended = null;
       audioRef.current.pause();
       audioRef.current.src = "";
     }
     setCurrentlyPlaying(null);
-  }, [stopProgressLoop]);
+  }, [stopRaf]);
 
   const play = useCallback(
     (filePath: string) => {
       stop();
+      currentPathRef.current = filePath;
       setCurrentlyPlaying(filePath);
+      setProgress(0);
 
       const audio = audioRef.current || new Audio();
       audioRef.current = audio;
       audio.volume = 0.7;
 
-      const handleEnded = () => {
-        stopProgressLoop();
+      audio.onended = () => {
+        if (currentPathRef.current !== filePath) return;
+        stopRaf();
         if (audio.duration < SHORT_SOUND_THRESHOLD) {
           timeoutRef.current = window.setTimeout(() => {
+            if (currentPathRef.current !== filePath) return;
             audio.currentTime = 0;
             setProgress(0);
             audio.play().catch(() => {});
-            startProgressLoop();
+            startRaf();
           }, LOOP_PAUSE_MS);
         } else {
           audio.currentTime = 0;
           setProgress(0);
           audio.play().catch(() => {});
-          startProgressLoop();
         }
       };
 
-      audio.onended = handleEnded;
-      audio.onplay = () => startProgressLoop();
-
       const url = convertFileSrc(filePath);
       audio.src = url;
+      startRaf();
       audio.play().catch((err) => {
-        // AbortError is expected when quickly hovering between sounds
         if (err.name === "AbortError") return;
         console.error("Failed to play audio:", err);
-        setCurrentlyPlaying(null);
+        if (currentPathRef.current === filePath) {
+          setCurrentlyPlaying(null);
+        }
       });
     },
-    [stop, stopProgressLoop, startProgressLoop]
+    [stop, stopRaf, startRaf]
   );
 
   useEffect(() => {
-    return () => {
-      stop();
-    };
+    return () => { stop(); };
   }, [stop]);
 
   return { play, stop, currentlyPlaying, progress };
