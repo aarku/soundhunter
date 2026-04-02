@@ -123,6 +123,7 @@ function DraggableResultRow({
       ref={setNodeRef}
       {...listeners}
       {...attributes}
+      className="overflow-hidden"
       style={{ opacity: isDragging ? 0.4 : 1 }}
     >
       {children}
