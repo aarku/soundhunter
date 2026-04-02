@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import {
   Search,
   FolderOpen,
@@ -197,33 +198,9 @@ function App() {
     toastTimeoutRef.current = window.setTimeout(() => setToast(null), 3000);
   }, []);
 
-  // Background CLAP embedding loop
-  const startEmbeddingLoop = useCallback(async () => {
-    let totalRemaining = 1;
-    let embedded = 0;
-    while (totalRemaining > 0) {
-      try {
-        const [done, remaining] = await api.embedNextFile();
-        totalRemaining = remaining - done;
-        embedded += done;
-        if (remaining > 0) {
-          setEmbeddingProgress(`Analyzing audio ${embedded}/${embedded + totalRemaining}...`);
-        }
-        // Refresh search engine every 10 files so new results appear incrementally
-        if (embedded > 0 && embedded % 10 === 0) {
-          await api.refreshEmbeddings();
-        }
-      } catch (e) {
-        console.error("Embedding error:", e);
-        break;
-      }
-    }
-    if (embedded > 0) {
-      await api.refreshEmbeddings();
-      showToast(`Analyzed ${embedded} audio files for semantic search`);
-    }
-    setEmbeddingProgress(null);
-  }, [showToast]);
+  const startEmbedding = useCallback(async () => {
+    api.startEmbedding().catch(console.error);
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
@@ -274,12 +251,29 @@ function App() {
     [activePlaylist, playlistItems]
   );
 
+  // Listen for embedding progress events from background thread
+  useEffect(() => {
+    const unlisten1 = listen<{ done: number; total: number }>("embedding-progress", (event) => {
+      setEmbeddingProgress(`Analyzing audio ${event.payload.done}/${event.payload.total}...`);
+    });
+    const unlisten2 = listen<{ total: number }>("embedding-complete", (event) => {
+      setEmbeddingProgress(null);
+      if (event.payload.total > 0) {
+        showToast(`Analyzed ${event.payload.total} audio files for semantic search`);
+      }
+    });
+    return () => {
+      unlisten1.then((f) => f());
+      unlisten2.then((f) => f());
+    };
+  }, [showToast]);
+
   // Load initial data + resume background embedding if needed
   useEffect(() => {
     api.getFolders().then(setFolders).catch(console.error);
     api.getStats().then((s) => {
       setStats(s);
-      if (s.total_files > 0) startEmbeddingLoop();
+      if (s.total_files > 0) startEmbedding();
     }).catch(console.error);
     api.getPlaylists().then(setPlaylists).catch(console.error);
   }, []);
@@ -327,7 +321,7 @@ function App() {
         setIsScanning(false);
       }
       // Start CLAP embedding in background
-      startEmbeddingLoop();
+      startEmbedding();
     }
   }, []);
 
@@ -347,8 +341,8 @@ function App() {
     } finally {
       setIsScanning(false);
     }
-    startEmbeddingLoop();
-  }, [startEmbeddingLoop]);
+    startEmbedding();
+  }, [startEmbedding]);
 
   const handleReveal = useCallback((path: string) => {
     api.revealInExplorer(path).catch(console.error);

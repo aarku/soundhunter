@@ -7,7 +7,7 @@ mod synonyms;
 use clap::ClapEngine;
 use state::AppState;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -47,7 +47,7 @@ pub fn run() {
             commands::reorder_playlist,
             commands::get_audio_metadata,
             commands::generate_waveform,
-            commands::embed_next_file,
+            commands::start_embedding,
             commands::refresh_embeddings,
         ])
         .run(tauri::generate_context!())
@@ -57,7 +57,7 @@ pub fn run() {
 mod commands {
     use super::state::AppState;
     use std::sync::Mutex;
-    use tauri::State;
+    use tauri::{Emitter, Manager, State};
 
     #[tauri::command]
     pub fn add_folder(
@@ -235,26 +235,37 @@ mod commands {
         super::scanner::get_metadata(&path).map_err(|e| e.to_string())
     }
 
-    /// Embed the next unprocessed audio file with CLAP.
-    /// Holds the ClapEngine lock during embedding, NOT the AppState lock.
+    /// Spawn a background thread to embed all unprocessed audio files.
+    /// Emits "embedding-progress" events with { done, total } and
+    /// "embedding-complete" when finished.
     #[tauri::command]
-    pub fn embed_next_file(
+    pub fn start_embedding(
+        app: tauri::AppHandle,
         state: State<'_, Mutex<AppState>>,
         clap_state: State<'_, Mutex<Option<super::clap::ClapEngine>>>,
         data_dir: State<'_, std::path::PathBuf>,
-    ) -> Result<(usize, usize), String> {
-        // 1. Get the next file path needing embedding (quick lock)
-        let path_to_embed = {
+    ) -> Result<(), String> {
+        // Collect all paths needing embedding (quick lock)
+        let paths_to_embed: Vec<String> = {
             let s = state.lock().map_err(|e| e.to_string())?;
-            s.next_unembedded_path()
+            let mut paths = Vec::new();
+            for folder in &s.get_folders() {
+                let files = super::scanner::scan_folder(folder);
+                for f in files {
+                    if s.next_unembedded_path_check(&f.path) {
+                        paths.push(f.path);
+                    }
+                }
+            }
+            paths
         };
 
-        let path = match path_to_embed {
-            Some(p) => p,
-            None => return Ok((0, 0)),
-        };
+        if paths_to_embed.is_empty() {
+            let _ = app.emit("embedding-complete", ());
+            return Ok(());
+        }
 
-        // 2. Ensure CLAP is initialized (separate lock, only blocks other embeddings)
+        // Ensure CLAP is initialized before spawning thread
         {
             let mut clap_lock = clap_state.lock().map_err(|e| e.to_string())?;
             if clap_lock.is_none() {
@@ -267,26 +278,53 @@ mod commands {
             }
         }
 
-        // 3. Embed the file (holds clap lock, NOT app state lock)
-        let embedding = {
-            let mut clap_lock = clap_state.lock().map_err(|e| e.to_string())?;
-            let clap = clap_lock.as_mut().unwrap();
-            match clap.embed_audio(&path) {
-                Ok(emb) => emb,
-                Err(e) => {
-                    eprintln!("Failed to embed {}: {}", path, e);
-                    Vec::new() // empty = failed, won't retry
+        let total = paths_to_embed.len();
+        let app_handle = app.clone();
+
+        std::thread::spawn(move || {
+            let state_ref = app_handle.state::<Mutex<AppState>>();
+            let clap_ref = app_handle.state::<Mutex<Option<super::clap::ClapEngine>>>();
+
+            let mut done = 0;
+            for path in &paths_to_embed {
+                let embedding = {
+                    let mut clap_lock = clap_ref.lock().unwrap();
+                    let clap = clap_lock.as_mut().unwrap();
+                    match clap.embed_audio(path) {
+                        Ok(emb) => emb,
+                        Err(e) => {
+                            eprintln!("Failed to embed {}: {}", path, e);
+                            Vec::new()
+                        }
+                    }
+                };
+
+                {
+                    let mut s = state_ref.lock().unwrap();
+                    let _ = s.store_embedding(path.clone(), embedding);
+                }
+
+                done += 1;
+                let _ = app_handle.emit("embedding-progress", serde_json::json!({
+                    "done": done,
+                    "total": total,
+                }));
+
+                if done % 20 == 0 {
+                    let mut s = state_ref.lock().unwrap();
+                    let _ = s.refresh_embeddings();
                 }
             }
-        };
 
-        // 4. Store result (quick lock)
-        let remaining = {
-            let mut s = state.lock().map_err(|e| e.to_string())?;
-            s.store_embedding(path, embedding).map_err(|e| e.to_string())?
-        };
+            {
+                let mut s = state_ref.lock().unwrap();
+                let _ = s.refresh_embeddings();
+            }
+            let _ = app_handle.emit("embedding-complete", serde_json::json!({ "total": done }));
+            eprintln!("Embedding complete: {} files", done);
+        });
 
-        Ok((1, remaining))
+        Ok(())
     }
 
     /// Refresh search engine with latest CLAP embeddings.

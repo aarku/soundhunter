@@ -154,16 +154,9 @@ impl AppState {
     }
 
     /// Get the next file path that hasn't been embedded yet. Quick operation.
-    pub fn next_unembedded_path(&self) -> Option<String> {
-        for folder in &self.folders {
-            let files = scanner::scan_folder(folder);
-            for f in files {
-                if !self.embedding_cache.embeddings.contains_key(&f.path) {
-                    return Some(f.path);
-                }
-            }
-        }
-        None
+    /// Check if a specific path needs embedding.
+    pub fn next_unembedded_path_check(&self, path: &str) -> bool {
+        !self.embedding_cache.embeddings.contains_key(path)
     }
 
     /// Store an embedding result and return the count of remaining unembedded files.
