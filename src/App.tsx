@@ -545,7 +545,10 @@ function App() {
       {contextMenu && playlists.length > 0 && (
         <div
           className="fixed bg-popover border border-border rounded-md shadow-lg py-1 z-50 min-w-[160px]"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+          style={{
+            left: Math.min(contextMenu.x, window.innerWidth - 200),
+            top: Math.min(contextMenu.y, window.innerHeight - (playlists.length * 32 + 40)),
+          }}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="px-3 py-1 text-xs text-muted-foreground font-medium">
