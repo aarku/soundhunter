@@ -613,8 +613,26 @@ function App() {
             </button>
           )}
           {results.length > 0 && (
-            <span className="text-xs text-muted-foreground whitespace-nowrap">
-              {results.length} results
+            <span className="text-xs text-muted-foreground whitespace-nowrap flex items-center gap-1.5">
+              {results.filter((r) => !hiddenPaths.has(r.path)).length} results
+              <button
+                className="text-primary hover:text-primary/80"
+                title="Save results as a new list"
+                onClick={async () => {
+                  const visible = results.filter((r) => !hiddenPaths.has(r.path));
+                  if (visible.length === 0) return;
+                  const name = query.trim() || "Untitled";
+                  const pls = await api.createPlaylist(name);
+                  setPlaylists(pls);
+                  const newPl = pls[pls.length - 1];
+                  for (const r of visible) {
+                    await api.addToPlaylist(newPl.id, r.path);
+                  }
+                  showToast(`Created list "${name}" with ${visible.length} sounds`);
+                }}
+              >
+                <ListPlus className="w-3.5 h-3.5" />
+              </button>
             </span>
           )}
         </div>
