@@ -8,6 +8,10 @@
 - [ ] CLAP model for audio+text shared embedding space (search by sound content, find similar sounds)
 - [ ] Auto-tagging via YAMNet or AudioSpectrogram Transformer locally using onnxruntime-rs
 
+## Moonshots
+
+- [ ] Torrent-based sound discovery: index the free Sonniss GDC bundle torrents, search/preview metadata, click to download individual files via selective torrent download (librqbit). No need to download entire bundles.
+
 ## Bugs
 
 ## Completed
