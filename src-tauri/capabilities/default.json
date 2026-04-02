@@ -7,13 +7,24 @@
     "core:default",
     "shell:allow-open",
     "dialog:allow-open",
+    "fs:default",
     {
-      "identifier": "fs:allow-read",
-      "allow": [{ "path": "**" }]
+      "identifier": "fs:allow-read-file",
+      "allow": [
+        { "path": "C:\\**" },
+        { "path": "D:\\**" },
+        { "path": "E:\\**" },
+        { "path": "F:\\**" }
+      ]
     },
     {
       "identifier": "fs:scope",
-      "allow": [{ "path": "**" }]
+      "allow": [
+        { "path": "C:\\**" },
+        { "path": "D:\\**" },
+        { "path": "E:\\**" },
+        { "path": "F:\\**" }
+      ]
     },
     {
       "identifier": "core:event:allow-emit-to",
