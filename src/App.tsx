@@ -477,7 +477,7 @@ function App() {
                 onContextMenu={(e) => handleContextMenu(e, result.path)}
               >
                 {/* Play indicator */}
-                <div className="w-5 shrink-0">
+                <div className="w-4 shrink-0">
                   {currentlyPlaying === result.path ? (
                     <Volume2 className="w-4 h-4 text-primary animate-pulse" />
                   ) : (
@@ -485,8 +485,8 @@ function App() {
                   )}
                 </div>
 
-                {/* Info */}
-                <div className="flex-1 min-w-0">
+                {/* Info - constrained so it doesn't push everything else out */}
+                <div className="min-w-0 shrink basis-[40%]">
                   <div className="text-sm font-medium truncate">{result.filename}</div>
                   <div className="text-xs text-muted-foreground truncate">
                     {result.parent_folder}
@@ -496,22 +496,22 @@ function App() {
                 {/* Waveform */}
                 <Waveform
                   filePath={result.path}
-                  width={120}
-                  height={28}
+                  width={80}
+                  height={24}
                   isPlaying={currentlyPlaying === result.path}
-                  className="shrink-0"
+                  className="shrink-0 hidden sm:block"
                 />
 
                 {/* Meta */}
-                <div className="text-xs text-muted-foreground shrink-0">
+                <div className="text-xs text-muted-foreground shrink-0 w-14 text-right">
                   {formatBytes(result.size_bytes)}
                 </div>
                 <div className="text-xs text-muted-foreground shrink-0 w-8 text-right">
                   .{result.extension}
                 </div>
 
-                {/* Actions */}
-                <div className="flex gap-1 opacity-0 group-hover:opacity-100 shrink-0">
+                {/* Actions - always visible */}
+                <div className="flex gap-1 shrink-0">
                   <button
                     className="p-1 rounded hover:bg-secondary text-muted-foreground hover:text-foreground"
                     onClick={(e) => {
@@ -520,7 +520,7 @@ function App() {
                     }}
                     title="Reveal in Explorer"
                   >
-                    <ExternalLink className="w-3 h-3" />
+                    <ExternalLink className="w-3.5 h-3.5" />
                   </button>
                   {playlists.length > 0 && (
                     <button
@@ -531,7 +531,7 @@ function App() {
                       }}
                       title="Add to list"
                     >
-                      <ListPlus className="w-3 h-3" />
+                      <ListPlus className="w-3.5 h-3.5" />
                     </button>
                   )}
                 </div>
