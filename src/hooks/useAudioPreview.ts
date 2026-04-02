@@ -76,9 +76,8 @@ export function useAudioPreview() {
       audio.src = url;
       audio.play().catch((err) => {
         // AbortError is expected when quickly hovering between sounds
-        if (err.name !== "AbortError") {
-          console.error("Failed to play audio:", err);
-        }
+        if (err.name === "AbortError") return;
+        console.error("Failed to play audio:", err);
         setCurrentlyPlaying(null);
       });
     },
