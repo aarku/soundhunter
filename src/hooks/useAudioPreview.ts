@@ -75,7 +75,10 @@ export function useAudioPreview() {
       const url = convertFileSrc(filePath);
       audio.src = url;
       audio.play().catch((err) => {
-        console.error("Failed to play audio:", err);
+        // AbortError is expected when quickly hovering between sounds
+        if (err.name !== "AbortError") {
+          console.error("Failed to play audio:", err);
+        }
         setCurrentlyPlaying(null);
       });
     },
