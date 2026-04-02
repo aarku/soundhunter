@@ -579,7 +579,7 @@ function App() {
       </div>
 
       {/* Main content */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Search bar */}
         <div className="p-3 border-b border-border flex items-center gap-2">
           <Search className="w-4 h-4 text-muted-foreground shrink-0" />
@@ -604,7 +604,7 @@ function App() {
         </div>
 
         {/* Results */}
-        <ScrollArea className="flex-1">
+        <ScrollArea className="flex-1 overflow-x-hidden">
           {results.length === 0 && query && !isSearching && (
             <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
               No results found
@@ -622,7 +622,7 @@ function App() {
             {results.map((result) => (
               <DraggableResultRow key={result.path} id={result.path}>
               <div
-                className={`px-4 py-2 flex items-center gap-3 hover:bg-accent/50 cursor-pointer transition-colors group ${
+                className={`px-4 py-2 flex items-center gap-3 hover:bg-accent/50 cursor-pointer transition-colors group w-full ${
                   currentlyPlaying === result.path ? "bg-primary/10" : ""
                 }`}
                 onMouseEnter={() => play(result.path)}
