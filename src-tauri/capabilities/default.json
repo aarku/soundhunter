@@ -8,6 +8,14 @@
     "shell:allow-open",
     "dialog:allow-open",
     {
+      "identifier": "fs:allow-read",
+      "allow": [{ "path": "**" }]
+    },
+    {
+      "identifier": "fs:scope",
+      "allow": [{ "path": "**" }]
+    },
+    {
       "identifier": "core:event:allow-emit-to",
       "allow": [{ "channel": "*" }]
     },

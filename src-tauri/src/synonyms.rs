@@ -18,7 +18,7 @@ fn get_model() -> &'static Mutex<TextEmbedding> {
 pub fn embed_texts(texts: &[String]) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
     let mut model = get_model().lock().map_err(|e| e.to_string())?;
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-    let embeddings = model.embed(refs, Some(256))?;
+    let embeddings = model.embed(refs, None)?;
     Ok(embeddings)
 }
 

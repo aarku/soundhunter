@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { readFile } from "@tauri-apps/plugin-fs";
 
 interface WaveformProps {
   filePath: string;
@@ -25,9 +25,8 @@ async function decodeWaveform(filePath: string, barCount: number): Promise<numbe
   const cached = waveformCache.get(filePath);
   if (cached && cached.length === barCount) return cached;
 
-  const src = convertFileSrc(filePath);
-  const response = await fetch(src);
-  const arrayBuffer = await response.arrayBuffer();
+  const data = await readFile(filePath);
+  const arrayBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
 
   const ctx = getAudioContext();
   const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
