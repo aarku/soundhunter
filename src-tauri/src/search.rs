@@ -1,5 +1,5 @@
+use crate::clap as clap_model;
 use crate::scanner::AudioFile;
-use crate::synonyms;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -84,7 +84,12 @@ impl SearchEngine {
         })
     }
 
-    pub fn reindex(&mut self, files: &[AudioFile]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn reindex(
+        &mut self,
+        files: &[AudioFile],
+        audio_paths: &[String],
+        audio_embeddings: &[Vec<f32>],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Tantivy index
         let mut writer: IndexWriter = self.index.writer(50_000_000)?;
         writer.delete_all_documents()?;
@@ -105,22 +110,9 @@ impl SearchEngine {
         writer.commit()?;
         self.reader.reload()?;
 
-        // Semantic embeddings
-        // Build search text: combine filename tokens + cleaned parent folder for richer context
-        let texts: Vec<String> = files
-            .iter()
-            .map(|f| {
-                let mut text = f.tokens.join(" ");
-                if !f.parent_folder_clean.is_empty() {
-                    text.push(' ');
-                    text.push_str(&f.parent_folder_clean);
-                }
-                text
-            })
-            .collect();
-
-        self.file_paths = files.iter().map(|f| f.path.clone()).collect();
-        self.embeddings = synonyms::embed_texts(&texts)?;
+        // Store CLAP audio embeddings for semantic search
+        self.file_paths = audio_paths.to_vec();
+        self.embeddings = audio_embeddings.to_vec();
 
         Ok(())
     }
@@ -129,6 +121,7 @@ impl SearchEngine {
         &self,
         query_str: &str,
         limit: usize,
+        query_embedding: Option<&[f32]>,
     ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
         let searcher = self.reader.searcher();
 
@@ -209,25 +202,24 @@ impl SearchEngine {
             }
         }
 
-        // 2. Semantic search via embeddings
+        // 2. Semantic search via CLAP embeddings (audio content similarity)
         let mut semantic_scores: HashMap<String, f32> = HashMap::new();
-        if !self.embeddings.is_empty() {
-            let query_emb = synonyms::embed_query(query_str)?;
+        if let Some(query_emb) = query_embedding {
+            if !self.embeddings.is_empty() {
+                let mut scored: Vec<(usize, f32)> = self
+                    .embeddings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, emb)| (i, clap_model::cosine_similarity(emb, query_emb)))
+                    .collect();
 
-            let mut scored: Vec<(usize, f32)> = self
-                .embeddings
-                .iter()
-                .enumerate()
-                .map(|(i, emb)| (i, synonyms::cosine_similarity(emb, &query_emb)))
-                .collect();
+                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            // Take top results with a minimum similarity threshold
-            for (i, score) in scored.iter().take(limit * 2) {
-                if *score > 0.15 {
-                    if let Some(path) = self.file_paths.get(*i) {
-                        semantic_scores.insert(path.clone(), *score);
+                for (i, score) in scored.iter().take(limit * 2) {
+                    if *score > 0.05 {
+                        if let Some(path) = self.file_paths.get(*i) {
+                            semantic_scores.insert(path.clone(), *score);
+                        }
                     }
                 }
             }

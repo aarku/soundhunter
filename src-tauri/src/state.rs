@@ -1,6 +1,8 @@
+use crate::clap::ClapEngine;
 use crate::scanner;
 use crate::search::{SearchEngine, SearchResult};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,12 +24,20 @@ struct PersistedData {
     playlists: Vec<Playlist>,
 }
 
+/// Cached audio embeddings keyed by file path.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct EmbeddingCache {
+    embeddings: HashMap<String, Vec<f32>>,
+}
+
 pub struct AppState {
     data_dir: PathBuf,
     folders: Vec<String>,
     playlists: Vec<Playlist>,
     search_engine: SearchEngine,
     file_count: usize,
+    clap_engine: Option<ClapEngine>,
+    embedding_cache: EmbeddingCache,
 }
 
 impl AppState {
@@ -37,6 +47,7 @@ impl AppState {
 
         let persisted = Self::load_persisted(&data_dir);
         let file_count = search_engine.doc_count();
+        let embedding_cache = Self::load_embedding_cache(&data_dir);
 
         Ok(Self {
             folders: persisted.folders,
@@ -44,7 +55,40 @@ impl AppState {
             search_engine,
             file_count,
             data_dir,
+            clap_engine: None,
+            embedding_cache,
         })
+    }
+
+    fn ensure_clap(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.clap_engine.is_none() {
+            eprintln!("Initializing CLAP engine...");
+            self.clap_engine = Some(ClapEngine::new(&self.data_dir)?);
+            eprintln!("CLAP engine ready.");
+        }
+        Ok(())
+    }
+
+    fn embedding_cache_path(data_dir: &PathBuf) -> PathBuf {
+        data_dir.join("clap_embeddings.json")
+    }
+
+    fn load_embedding_cache(data_dir: &PathBuf) -> EmbeddingCache {
+        let path = Self::embedding_cache_path(data_dir);
+        if path.exists() {
+            if let Ok(data) = std::fs::read_to_string(&path) {
+                if let Ok(cache) = serde_json::from_str::<EmbeddingCache>(&data) {
+                    return cache;
+                }
+            }
+        }
+        EmbeddingCache::default()
+    }
+
+    fn save_embedding_cache(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let json = serde_json::to_string(&self.embedding_cache)?;
+        std::fs::write(Self::embedding_cache_path(&self.data_dir), json)?;
+        Ok(())
     }
 
     fn persisted_path(data_dir: &PathBuf) -> PathBuf {
@@ -104,17 +148,61 @@ impl AppState {
         }
 
         let count = all_files.len();
-        self.search_engine.reindex(&all_files)?;
+
+        // Compute CLAP audio embeddings for new files
+        self.ensure_clap()?;
+        if let Some(ref mut clap) = self.clap_engine {
+            let mut new_count = 0;
+            for file in &all_files {
+                if !self.embedding_cache.embeddings.contains_key(&file.path) {
+                    match clap.embed_audio(&file.path) {
+                        Ok(embedding) => {
+                            self.embedding_cache.embeddings.insert(file.path.clone(), embedding);
+                            new_count += 1;
+                            if new_count % 10 == 0 {
+                                eprintln!("Embedded {}/{} audio files...", new_count, count);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to embed {}: {}", file.path, e);
+                        }
+                    }
+                }
+            }
+            if new_count > 0 {
+                eprintln!("Embedded {} new audio files.", new_count);
+                self.save_embedding_cache()?;
+            }
+        }
+
+        // Build file_paths + embeddings vectors for search engine
+        let mut audio_embeddings: Vec<Vec<f32>> = Vec::new();
+        let mut audio_paths: Vec<String> = Vec::new();
+        for file in &all_files {
+            if let Some(emb) = self.embedding_cache.embeddings.get(&file.path) {
+                audio_paths.push(file.path.clone());
+                audio_embeddings.push(emb.clone());
+            }
+        }
+
+        self.search_engine.reindex(&all_files, &audio_paths, &audio_embeddings)?;
         self.file_count = count;
         Ok(count)
     }
 
     pub fn search(
-        &self,
+        &mut self,
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
-        self.search_engine.search(query, limit)
+        // Get CLAP text embedding for semantic search
+        let query_embedding = if let Some(ref mut clap) = self.clap_engine {
+            clap.embed_text(query).ok()
+        } else {
+            None
+        };
+
+        self.search_engine.search(query, limit, query_embedding.as_deref())
     }
 
     pub fn get_stats(&self) -> Stats {

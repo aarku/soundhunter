@@ -1,3 +1,4 @@
+mod clap;
 mod scanner;
 mod search;
 mod state;
@@ -90,7 +91,7 @@ mod commands {
         query: String,
         limit: Option<usize>,
     ) -> Result<Vec<super::search::SearchResult>, String> {
-        let s = state.lock().map_err(|e| e.to_string())?;
+        let mut s = state.lock().map_err(|e| e.to_string())?;
         s.search(&query, limit.unwrap_or(200))
             .map_err(|e| e.to_string())
     }
