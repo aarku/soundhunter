@@ -185,6 +185,15 @@ function App() {
   const searchTimeoutRef = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
+  const [hiddenPaths, setHiddenPaths] = useState<Set<string>>(new Set());
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimeoutRef = useRef<number | null>(null);
+
+  const showToast = useCallback((message: string) => {
+    setToast(message);
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    toastTimeoutRef.current = window.setTimeout(() => setToast(null), 3000);
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
@@ -599,7 +608,7 @@ function App() {
           />
           {isSearching && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
           {query && (
-            <button onClick={() => setQuery("")} className="text-muted-foreground hover:text-foreground">
+            <button onClick={() => { setQuery(""); setHiddenPaths(new Set()); }} className="text-muted-foreground hover:text-foreground">
               <X className="w-4 h-4" />
             </button>
           )}
@@ -626,7 +635,7 @@ function App() {
           )}
 
           <div className="divide-y divide-border">
-            {results.map((result) => (
+            {results.filter((r) => !hiddenPaths.has(r.path)).map((result) => (
               <DraggableResultRow key={result.path} id={result.path}>
               <div
                 className={`px-4 py-2 flex items-center gap-3 hover:bg-accent/50 cursor-pointer transition-colors group w-full ${
@@ -634,6 +643,12 @@ function App() {
                 }`}
                 onMouseEnter={() => play(result.path)}
                 onMouseLeave={() => stop()}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  const name = result.filename;
+                  setHiddenPaths((prev) => new Set(prev).add(result.path));
+                  showToast(`Hidden "${name}" from results`);
+                }}
               >
                 {/* Play indicator */}
                 <div className="w-4 shrink-0">
@@ -721,11 +736,30 @@ function App() {
               </div>
               </DraggableResultRow>
             ))}
+            {hiddenPaths.size > 0 && (
+              <div className="px-4 py-3 text-xs text-muted-foreground text-center">
+                ...and {hiddenPaths.size} result{hiddenPaths.size > 1 ? "s" : ""} temporarily hidden.{" "}
+                <button
+                  className="text-primary hover:underline"
+                  onClick={() => setHiddenPaths(new Set())}
+                >
+                  Click to show.
+                </button>
+              </div>
+            )}
           </div>
         </ScrollArea>
       </div>
 
     </div>
+
+    {/* Toast */}
+    {toast && (
+      <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-card border border-border rounded-md shadow-lg text-sm text-foreground animate-in fade-in slide-in-from-bottom-2 duration-200">
+        {toast}
+      </div>
+    )}
+
     <DragOverlay>
       {draggedItem && (
         <div className="px-3 py-1.5 rounded bg-accent text-sm font-medium shadow-lg border border-border max-w-64 truncate">
