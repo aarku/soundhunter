@@ -1,38 +1,8 @@
 import { useRef, useCallback, useEffect, useState } from "react";
-import { readFile } from "@tauri-apps/plugin-fs";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 const SHORT_SOUND_THRESHOLD = 2; // seconds
 const LOOP_PAUSE_MS = 1000;
-
-// Cache blob URLs to avoid re-reading files
-const blobUrlCache = new Map<string, string>();
-
-function getMimeType(filePath: string): string {
-  const ext = filePath.split(".").pop()?.toLowerCase() || "";
-  const mimeMap: Record<string, string> = {
-    wav: "audio/wav",
-    mp3: "audio/mpeg",
-    ogg: "audio/ogg",
-    flac: "audio/flac",
-    aac: "audio/aac",
-    m4a: "audio/mp4",
-    aif: "audio/aiff",
-    aiff: "audio/aiff",
-    wma: "audio/x-ms-wma",
-  };
-  return mimeMap[ext] || "audio/wav";
-}
-
-async function getAudioUrl(filePath: string): Promise<string> {
-  const cached = blobUrlCache.get(filePath);
-  if (cached) return cached;
-
-  const data = await readFile(filePath);
-  const blob = new Blob([data], { type: getMimeType(filePath) });
-  const url = URL.createObjectURL(blob);
-  blobUrlCache.set(filePath, url);
-  return url;
-}
 
 export function useAudioPreview() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -74,15 +44,13 @@ export function useAudioPreview() {
 
       audio.onended = handleEnded;
 
-      getAudioUrl(filePath)
-        .then((url) => {
-          audio.src = url;
-          audio.play().catch(() => {});
-        })
-        .catch((err) => {
-          console.error("Failed to load audio:", err);
-          setCurrentlyPlaying(null);
-        });
+      // Use asset protocol - streams directly, no need to read entire file
+      const url = convertFileSrc(filePath);
+      audio.src = url;
+      audio.play().catch((err) => {
+        console.error("Failed to play audio:", err);
+        setCurrentlyPlaying(null);
+      });
     },
     [stop]
   );

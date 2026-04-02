@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { readFile } from "@tauri-apps/plugin-fs";
+import { invoke } from "@tauri-apps/api/core";
 
 interface WaveformProps {
   filePath: string;
@@ -9,54 +9,13 @@ interface WaveformProps {
   className?: string;
 }
 
-// Cache decoded waveform data so we don't re-decode
+// Cache waveform peaks so we don't re-generate
 const waveformCache = new Map<string, number[]>();
-
-// Shared AudioContext
-let audioContext: AudioContext | null = null;
-function getAudioContext(): AudioContext {
-  if (!audioContext) {
-    audioContext = new AudioContext();
-  }
-  return audioContext;
-}
-
-async function decodeWaveform(filePath: string, barCount: number): Promise<number[]> {
-  const cached = waveformCache.get(filePath);
-  if (cached && cached.length === barCount) return cached;
-
-  const data = await readFile(filePath);
-  const arrayBuffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-
-  const ctx = getAudioContext();
-  const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-
-  const channelData = audioBuffer.getChannelData(0);
-  const samplesPerBar = Math.floor(channelData.length / barCount);
-  const bars: number[] = [];
-
-  for (let i = 0; i < barCount; i++) {
-    let sum = 0;
-    const start = i * samplesPerBar;
-    const end = Math.min(start + samplesPerBar, channelData.length);
-    for (let j = start; j < end; j++) {
-      sum += Math.abs(channelData[j]);
-    }
-    bars.push(sum / (end - start));
-  }
-
-  // Normalize to 0-1
-  const max = Math.max(...bars, 0.001);
-  const normalized = bars.map((b) => b / max);
-
-  waveformCache.set(filePath, normalized);
-  return normalized;
-}
 
 export function Waveform({
   filePath,
-  width = 120,
-  height = 28,
+  width = 80,
+  height = 24,
   isPlaying = false,
   className = "",
 }: WaveformProps) {
@@ -65,7 +24,7 @@ export function Waveform({
   const [visible, setVisible] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Intersection observer: only decode when visible
+  // Intersection observer: only generate when visible
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -84,16 +43,25 @@ export function Waveform({
     return () => observer.disconnect();
   }, []);
 
-  // Decode when visible
+  // Generate peaks when visible (Rust does the heavy lifting off-thread)
   useEffect(() => {
     if (!visible) return;
 
-    let cancelled = false;
-    const barCount = Math.floor(width / 3); // ~3px per bar
+    const cached = waveformCache.get(filePath);
+    if (cached) {
+      setBars(cached);
+      return;
+    }
 
-    decodeWaveform(filePath, barCount)
-      .then((data) => {
-        if (!cancelled) setBars(data);
+    let cancelled = false;
+    const barCount = Math.floor(width / 3);
+
+    invoke<number[]>("generate_waveform", { path: filePath, barCount })
+      .then((peaks) => {
+        if (!cancelled) {
+          waveformCache.set(filePath, peaks);
+          setBars(peaks);
+        }
       })
       .catch(() => {
         // Silently fail for unsupported formats
@@ -120,21 +88,16 @@ export function Waveform({
 
     const barWidth = 2;
     const gap = 1;
-    const barCount = bars.length;
     const midY = height / 2;
 
-    for (let i = 0; i < barCount; i++) {
+    for (let i = 0; i < bars.length; i++) {
       const x = i * (barWidth + gap);
       const barHeight = Math.max(1, bars[i] * (height - 2));
       const halfBar = barHeight / 2;
 
-      if (isPlaying) {
-        // Cyan/primary color when playing
-        ctx.fillStyle = "oklch(0.7 0.15 200 / 0.9)";
-      } else {
-        // Muted when not playing
-        ctx.fillStyle = "oklch(0.5 0 0 / 0.4)";
-      }
+      ctx.fillStyle = isPlaying
+        ? "oklch(0.7 0.15 200 / 0.9)"
+        : "oklch(0.5 0 0 / 0.4)";
 
       ctx.beginPath();
       ctx.roundRect(x, midY - halfBar, barWidth, barHeight, 1);
@@ -144,10 +107,7 @@ export function Waveform({
 
   return (
     <div ref={containerRef} className={className} style={{ width, height }}>
-      <canvas
-        ref={canvasRef}
-        style={{ width, height }}
-      />
+      <canvas ref={canvasRef} style={{ width, height }} />
     </div>
   );
 }

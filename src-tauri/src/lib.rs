@@ -41,6 +41,7 @@ pub fn run() {
             commands::get_playlist_items,
             commands::reorder_playlist,
             commands::get_audio_metadata,
+            commands::generate_waveform,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -212,5 +213,14 @@ mod commands {
         path: String,
     ) -> Result<super::scanner::AudioMetadata, String> {
         super::scanner::get_metadata(&path).map_err(|e| e.to_string())
+    }
+
+    /// Generate waveform peaks by seeking across a WAV file.
+    /// Reads small chunks at evenly-spaced positions - works on huge files.
+    /// Returns normalized peak values (0.0-1.0).
+    #[tauri::command]
+    pub fn generate_waveform(path: String, bar_count: usize) -> Result<Vec<f32>, String> {
+        super::scanner::generate_waveform_peaks(&path, bar_count)
+            .map_err(|e| e.to_string())
     }
 }

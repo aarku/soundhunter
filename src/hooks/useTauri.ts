@@ -91,3 +91,4 @@ export async function reorderPlaylist(playlistId: string, items: string[]): Prom
 export async function getAudioMetadata(path: string): Promise<AudioMetadata> {
   return invoke("get_audio_metadata", { path });
 }
+

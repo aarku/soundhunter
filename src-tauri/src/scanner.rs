@@ -137,6 +137,155 @@ fn tokenize_filename(name: &str) -> Vec<String> {
 /// "3maze - Interference" -> "Interference"
 /// "Sonniss.com - GDC 2019 - Game Audio Bundle" -> "GDC 2019 - Game Audio Bundle"
 /// If there's no " - " separator, returns the original string unchanged.
+/// Generate waveform peaks by seeking across a WAV file.
+/// Reads small sample windows at evenly-spaced positions across the file.
+pub fn generate_waveform_peaks(
+    path: &str,
+    bar_count: usize,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+    let file_size = file.metadata()?.len() as usize;
+
+    if file_size < 44 {
+        return Ok(vec![0.5; bar_count]);
+    }
+
+    // Read WAV header
+    let mut header = [0u8; 44];
+    file.read_exact(&mut header)?;
+
+    // Parse basic WAV info
+    let riff = &header[0..4];
+    if riff != b"RIFF" {
+        // Not a WAV - return flat waveform
+        return Ok(vec![0.5; bar_count]);
+    }
+
+    let num_channels = u16::from_le_bytes([header[22], header[23]]) as usize;
+    let bits_per_sample = u16::from_le_bytes([header[34], header[35]]) as usize;
+    let bytes_per_sample = bits_per_sample / 8;
+    let frame_size = bytes_per_sample * num_channels;
+
+    // Find "data" chunk
+    let mut data_start: usize = 12;
+    let mut data_size: usize = 0;
+    file.seek(SeekFrom::Start(12))?;
+
+    let mut chunk_header = [0u8; 8];
+    loop {
+        if file.read_exact(&mut chunk_header).is_err() {
+            break;
+        }
+        let chunk_id = &chunk_header[0..4];
+        let chunk_size = u32::from_le_bytes([
+            chunk_header[4],
+            chunk_header[5],
+            chunk_header[6],
+            chunk_header[7],
+        ]) as usize;
+
+        if chunk_id == b"data" {
+            data_start = file.stream_position()? as usize;
+            data_size = chunk_size;
+            break;
+        }
+        // Skip chunk
+        file.seek(SeekFrom::Current(chunk_size as i64))?;
+    }
+
+    if data_size == 0 || frame_size == 0 {
+        return Ok(vec![0.5; bar_count]);
+    }
+
+    let total_frames = data_size / frame_size;
+    if total_frames < bar_count {
+        return Ok(vec![0.5; bar_count]);
+    }
+
+    // Sample evenly across the file: read a small window at each bar position
+    let samples_per_window = 512.min(total_frames / bar_count);
+    let window_bytes = samples_per_window * frame_size;
+    let mut buf = vec![0u8; window_bytes];
+    let mut peaks = Vec::with_capacity(bar_count);
+
+    for i in 0..bar_count {
+        let frame_offset = (i as u64 * total_frames as u64) / bar_count as u64;
+        let byte_offset = data_start as u64 + frame_offset * frame_size as u64;
+
+        if file.seek(SeekFrom::Start(byte_offset)).is_err() {
+            peaks.push(0.0);
+            continue;
+        }
+
+        let read = match file.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => {
+                peaks.push(0.0);
+                continue;
+            }
+        };
+
+        let frames_read = read / frame_size;
+        if frames_read == 0 {
+            peaks.push(0.0);
+            continue;
+        }
+
+        let mut peak: f32 = 0.0;
+        for f in 0..frames_read {
+            let offset = f * frame_size;
+            let sample = match bits_per_sample {
+                16 => {
+                    if offset + 1 < read {
+                        i16::from_le_bytes([buf[offset], buf[offset + 1]]) as f32 / 32768.0
+                    } else {
+                        0.0
+                    }
+                }
+                24 => {
+                    if offset + 2 < read {
+                        let val =
+                            ((buf[offset + 2] as i32) << 24)
+                            | ((buf[offset + 1] as i32) << 16)
+                            | ((buf[offset] as i32) << 8);
+                        (val as f32) / 2147483648.0
+                    } else {
+                        0.0
+                    }
+                }
+                32 => {
+                    if offset + 3 < read {
+                        f32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]])
+                    } else {
+                        0.0
+                    }
+                }
+                _ => {
+                    // 8-bit unsigned
+                    if offset < read {
+                        (buf[offset] as f32 - 128.0) / 128.0
+                    } else {
+                        0.0
+                    }
+                }
+            };
+
+            let abs = sample.abs();
+            if abs > peak {
+                peak = abs;
+            }
+        }
+
+        peaks.push(peak);
+    }
+
+    // Normalize
+    let max = peaks.iter().cloned().fold(0.001f32, f32::max);
+    Ok(peaks.iter().map(|p| p / max).collect())
+}
+
 fn strip_publisher_prefix(folder: &str) -> String {
     if let Some(idx) = folder.find(" - ") {
         folder[idx + 3..].to_string()
