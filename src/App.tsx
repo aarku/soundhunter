@@ -485,8 +485,8 @@ function App() {
                   )}
                 </div>
 
-                {/* Info - constrained so it doesn't push everything else out */}
-                <div className="min-w-0 shrink basis-[40%]">
+                {/* Info */}
+                <div className="flex-1 min-w-0 overflow-hidden">
                   <div className="text-sm font-medium truncate">{result.filename}</div>
                   <div className="text-xs text-muted-foreground truncate">
                     {result.parent_folder}
