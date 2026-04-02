@@ -26,6 +26,8 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
+  useDraggable,
+  useDroppable,
   type DragStartEvent,
   type DragEndEvent,
 } from "@dnd-kit/core";
@@ -104,6 +106,52 @@ function SortablePlaylistItem({
   );
 }
 
+function DraggableResultRow({
+  id,
+  children,
+}: {
+  id: string;
+  children: React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `search:${id}`,
+    data: { type: "search-result", path: id },
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      {...listeners}
+      {...attributes}
+      style={{ opacity: isDragging ? 0.4 : 1 }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function DroppablePlaylistHeader({
+  playlistId,
+  children,
+}: {
+  playlistId: string;
+  children: React.ReactNode;
+}) {
+  const { setNodeRef, isOver: hovering } = useDroppable({
+    id: `playlist:${playlistId}`,
+    data: { type: "playlist", playlistId },
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={hovering ? "ring-1 ring-primary rounded" : ""}
+    >
+      {children}
+    </div>
+  );
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return bytes + " B";
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
@@ -142,12 +190,33 @@ function App() {
     async (event: DragEndEvent) => {
       setDraggedItem(null);
       const { active, over } = event;
-      if (!over || !activePlaylist) return;
+      if (!over) return;
+
+      const activeId = active.id as string;
+      const overId = over.id as string;
+
+      // Drag search result onto a playlist header
+      if (activeId.startsWith("search:") && overId.startsWith("playlist:")) {
+        const filePath = active.data.current?.path as string;
+        const playlistId = over.data.current?.playlistId as string;
+        if (filePath && playlistId) {
+          await api.addToPlaylist(playlistId, filePath);
+          // Refresh playlists to update counts
+          const pls = await api.getPlaylists();
+          setPlaylists(pls);
+          if (activePlaylist === playlistId) {
+            const items = await api.getPlaylistItems(playlistId);
+            setPlaylistItems(items);
+          }
+        }
+        return;
+      }
 
       // Reorder within playlist
-      if (active.id !== over.id && playlistItems.includes(active.id as string)) {
-        const oldIndex = playlistItems.indexOf(active.id as string);
-        const newIndex = playlistItems.indexOf(over.id as string);
+      if (!activePlaylist) return;
+      if (activeId !== overId && playlistItems.includes(activeId)) {
+        const oldIndex = playlistItems.indexOf(activeId);
+        const newIndex = playlistItems.indexOf(overId);
         if (oldIndex !== -1 && newIndex !== -1) {
           const newItems = arrayMove(playlistItems, oldIndex, newIndex);
           setPlaylistItems(newItems);
@@ -290,6 +359,12 @@ function App() {
   }, []);
 
   return (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      onDragStart={handleDragStart}
+      onDragEnd={handleDragEnd}
+    >
     <div className="flex h-screen bg-background text-foreground overflow-hidden select-none">
       {/* Sidebar */}
       <div className="w-64 border-r border-border flex flex-col bg-card">
@@ -391,12 +466,6 @@ function App() {
           )}
 
           {sidebarView === "playlists" && (
-            <DndContext
-              sensors={sensors}
-              collisionDetection={closestCenter}
-              onDragStart={handleDragStart}
-              onDragEnd={handleDragEnd}
-            >
             <div className="p-3 space-y-2">
               <div className="flex gap-1">
                 <Input
@@ -419,6 +488,7 @@ function App() {
               <div className="space-y-1">
                 {playlists.map((pl) => (
                   <div key={pl.id}>
+                    <DroppablePlaylistHeader playlistId={pl.id}>
                     <div
                       className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer group ${
                         activePlaylist === pl.id
@@ -465,18 +535,11 @@ function App() {
                         </SortableContext>
                       </div>
                     )}
+                    </DroppablePlaylistHeader>
                   </div>
                 ))}
               </div>
             </div>
-            <DragOverlay>
-              {draggedItem && (
-                <div className="px-2 py-1 rounded bg-accent text-xs font-medium shadow-lg border border-border">
-                  {draggedItem.split(/[/\\]/).pop()}
-                </div>
-              )}
-            </DragOverlay>
-            </DndContext>
           )}
 
           {sidebarView === "search" && (
@@ -556,8 +619,8 @@ function App() {
 
           <div className="divide-y divide-border">
             {results.map((result) => (
+              <DraggableResultRow key={result.path} id={result.path}>
               <div
-                key={result.path}
                 className={`px-4 py-2 flex items-center gap-3 hover:bg-accent/50 cursor-pointer transition-colors group ${
                   currentlyPlaying === result.path ? "bg-primary/10" : ""
                 }`}
@@ -646,12 +709,21 @@ function App() {
                   )}
                 </div>
               </div>
+              </DraggableResultRow>
             ))}
           </div>
         </ScrollArea>
       </div>
 
     </div>
+    <DragOverlay>
+      {draggedItem && (
+        <div className="px-3 py-1.5 rounded bg-accent text-sm font-medium shadow-lg border border-border max-w-64 truncate">
+          {draggedItem.replace(/^search:/, "").split(/[/\\]/).pop()}
+        </div>
+      )}
+    </DragOverlay>
+    </DndContext>
   );
 }
 
