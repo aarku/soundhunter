@@ -20,6 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Waveform } from "@/components/Waveform";
 import { useAudioPreview } from "@/hooks/useAudioPreview";
 import * as api from "@/hooks/useTauri";
 import type { SearchResult, Playlist } from "@/hooks/useTauri";
@@ -491,6 +492,15 @@ function App() {
                     {result.parent_folder}
                   </div>
                 </div>
+
+                {/* Waveform */}
+                <Waveform
+                  filePath={result.path}
+                  width={120}
+                  height={28}
+                  isPlaying={currentlyPlaying === result.path}
+                  className="shrink-0"
+                />
 
                 {/* Meta */}
                 <div className="text-xs text-muted-foreground shrink-0">
