@@ -6,6 +6,8 @@ interface WaveformProps {
   width?: number;
   height?: number;
   isPlaying?: boolean;
+  /** 0.0 - 1.0 playback progress */
+  progress?: number;
   className?: string;
 }
 
@@ -17,6 +19,7 @@ export function Waveform({
   width = 80,
   height = 24,
   isPlaying = false,
+  progress = 0,
   className = "",
 }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -43,7 +46,7 @@ export function Waveform({
     return () => observer.disconnect();
   }, []);
 
-  // Generate peaks when visible (Rust does the heavy lifting off-thread)
+  // Generate peaks when visible
   useEffect(() => {
     if (!visible) return;
 
@@ -63,16 +66,14 @@ export function Waveform({
           setBars(peaks);
         }
       })
-      .catch(() => {
-        // Silently fail for unsupported formats
-      });
+      .catch(() => {});
 
     return () => {
       cancelled = true;
     };
   }, [filePath, visible, width]);
 
-  // Draw
+  // Draw - re-renders on progress change for playhead
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !bars) return;
@@ -88,22 +89,30 @@ export function Waveform({
 
     const barWidth = 2;
     const gap = 1;
+    const step = barWidth + gap;
     const midY = height / 2;
+    const progressX = isPlaying ? progress * width : 0;
 
     for (let i = 0; i < bars.length; i++) {
-      const x = i * (barWidth + gap);
+      const x = i * step;
       const barHeight = Math.max(1, bars[i] * (height - 2));
       const halfBar = barHeight / 2;
 
-      ctx.fillStyle = isPlaying
-        ? "oklch(0.7 0.15 200 / 0.9)"
-        : "oklch(0.5 0 0 / 0.4)";
+      // Bars before the playhead are "played" (bright), after are dim
+      if (isPlaying && x + barWidth <= progressX) {
+        ctx.fillStyle = "oklch(0.7 0.15 200 / 0.95)";
+      } else if (isPlaying && x < progressX) {
+        // Partially filled bar at the playhead edge
+        ctx.fillStyle = "oklch(0.7 0.15 200 / 0.7)";
+      } else {
+        ctx.fillStyle = "oklch(0.5 0 0 / 0.35)";
+      }
 
       ctx.beginPath();
       ctx.roundRect(x, midY - halfBar, barWidth, barHeight, 1);
       ctx.fill();
     }
-  }, [bars, width, height, isPlaying]);
+  }, [bars, width, height, isPlaying, progress]);
 
   return (
     <div ref={containerRef} className={className} style={{ width, height }}>

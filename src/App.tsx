@@ -159,6 +159,13 @@ function formatBytes(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1) + " MB";
 }
 
+function formatDuration(seconds: number): string {
+  if (seconds <= 0) return "--:--";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
 type SidebarView = "search" | "folders" | "playlists";
 
 function App() {
@@ -174,7 +181,7 @@ function App() {
   const [playlistItems, setPlaylistItems] = useState<string[]>([]);
   const [newPlaylistName, setNewPlaylistName] = useState("");
 
-  const { play, stop, currentlyPlaying } = useAudioPreview();
+  const { play, stop, currentlyPlaying, progress } = useAudioPreview();
   const searchTimeoutRef = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
@@ -651,6 +658,7 @@ function App() {
                   width={80}
                   height={24}
                   isPlaying={currentlyPlaying === result.path}
+                  progress={currentlyPlaying === result.path ? progress : 0}
                   className="shrink-0 hidden sm:block"
                 />
 
@@ -658,8 +666,8 @@ function App() {
                 <div className="text-xs text-muted-foreground shrink-0 w-14 text-right">
                   {formatBytes(result.size_bytes)}
                 </div>
-                <div className="text-xs text-muted-foreground shrink-0 w-8 text-right">
-                  .{result.extension}
+                <div className="text-xs text-muted-foreground shrink-0 w-10 text-right tabular-nums">
+                  {formatDuration(result.duration_seconds)}
                 </div>
 
                 {/* Actions - always visible */}

@@ -18,6 +18,7 @@ pub struct AudioFile {
     pub tokens: Vec<String>,
     pub extension: String,
     pub size_bytes: u64,
+    pub duration_seconds: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,9 +87,11 @@ pub fn scan_folder(folder: &str) -> Vec<AudioFile> {
         let tokens = tokenize_filename(&filename);
 
         let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let path_str = path.to_string_lossy().to_string();
+        let duration_seconds = get_wav_duration(&path_str).unwrap_or(0.0);
 
         files.push(AudioFile {
-            path: path.to_string_lossy().to_string(),
+            path: path_str,
             filename,
             folder: folder.to_string(),
             parent_folder,
@@ -96,6 +99,7 @@ pub fn scan_folder(folder: &str) -> Vec<AudioFile> {
             tokens,
             extension: ext,
             size_bytes,
+            duration_seconds,
         });
     }
 
@@ -137,6 +141,51 @@ fn tokenize_filename(name: &str) -> Vec<String> {
 /// "3maze - Interference" -> "Interference"
 /// "Sonniss.com - GDC 2019 - Game Audio Bundle" -> "GDC 2019 - Game Audio Bundle"
 /// If there's no " - " separator, returns the original string unchanged.
+/// Get duration of a WAV file from its header without reading the whole file.
+fn get_wav_duration(path: &str) -> Result<f32, Box<dyn std::error::Error>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+    let mut header = [0u8; 44];
+    file.read_exact(&mut header)?;
+
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return Ok(0.0);
+    }
+
+    let num_channels = u16::from_le_bytes([header[22], header[23]]) as u32;
+    let sample_rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
+    let bits_per_sample = u16::from_le_bytes([header[34], header[35]]) as u32;
+
+    if sample_rate == 0 || num_channels == 0 || bits_per_sample == 0 {
+        return Ok(0.0);
+    }
+
+    // Find "data" chunk to get actual data size
+    file.seek(SeekFrom::Start(12))?;
+    let mut chunk_header = [0u8; 8];
+    loop {
+        if file.read_exact(&mut chunk_header).is_err() {
+            break;
+        }
+        let chunk_id = &chunk_header[0..4];
+        let chunk_size = u32::from_le_bytes([
+            chunk_header[4], chunk_header[5], chunk_header[6], chunk_header[7],
+        ]);
+        if chunk_id == b"data" {
+            let bytes_per_frame = num_channels * bits_per_sample / 8;
+            if bytes_per_frame > 0 {
+                let total_frames = chunk_size / bytes_per_frame;
+                return Ok(total_frames as f32 / sample_rate as f32);
+            }
+            break;
+        }
+        file.seek(SeekFrom::Current(chunk_size as i64))?;
+    }
+
+    Ok(0.0)
+}
+
 /// Generate waveform peaks by seeking across a WAV file.
 /// Reads small sample windows at evenly-spaced positions across the file.
 pub fn generate_waveform_peaks(

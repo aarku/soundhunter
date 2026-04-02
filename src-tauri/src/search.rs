@@ -16,6 +16,7 @@ pub struct SearchResult {
     pub score: f32,
     pub extension: String,
     pub size_bytes: u64,
+    pub duration_seconds: f32,
 }
 
 pub struct SearchEngine {
@@ -29,6 +30,7 @@ pub struct SearchEngine {
     f_parent_folder: Field,
     f_extension: Field,
     f_size: Field,
+    f_duration: Field,
     // Semantic search data
     embeddings: Vec<Vec<f32>>,
     file_paths: Vec<String>, // parallel to embeddings, for lookup
@@ -44,15 +46,21 @@ impl SearchEngine {
         let f_parent_folder = schema_builder.add_text_field("parent_folder", STORED | TEXT);
         let f_extension = schema_builder.add_text_field("extension", STORED | STRING);
         let f_size = schema_builder.add_u64_field("size", STORED | INDEXED);
+        let f_duration = schema_builder.add_f64_field("duration", STORED);
 
         let schema = schema_builder.build();
 
         std::fs::create_dir_all(index_path)?;
 
-        let index = if index_path.join("meta.json").exists() {
-            Index::open_in_dir(index_path)?
-        } else {
-            Index::create_in_dir(index_path, schema.clone())?
+        // Try to open existing index; if schema is incompatible, recreate
+        let index = match Index::open_in_dir(index_path) {
+            Ok(idx) => idx,
+            Err(_) => {
+                // Remove stale index and recreate
+                let _ = std::fs::remove_dir_all(index_path);
+                std::fs::create_dir_all(index_path)?;
+                Index::create_in_dir(index_path, schema.clone())?
+            }
         };
 
         let reader = index
@@ -70,6 +78,7 @@ impl SearchEngine {
             f_parent_folder,
             f_extension,
             f_size,
+            f_duration,
             embeddings: Vec::new(),
             file_paths: Vec::new(),
         })
@@ -89,6 +98,7 @@ impl SearchEngine {
             doc.add_text(self.f_parent_folder, &file.parent_folder);
             doc.add_text(self.f_extension, &file.extension);
             doc.add_u64(self.f_size, file.size_bytes);
+            doc.add_f64(self.f_duration, file.duration_seconds as f64);
             writer.add_document(doc)?;
         }
 
@@ -285,6 +295,11 @@ impl SearchEngine {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
 
+                let duration_seconds = doc
+                    .get_first(self.f_duration)
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32;
+
                 results.push(SearchResult {
                     path,
                     filename,
@@ -292,6 +307,7 @@ impl SearchEngine {
                     score,
                     extension,
                     size_bytes,
+                    duration_seconds,
                 });
             }
         }

@@ -7,6 +7,7 @@ export interface SearchResult {
   score: number;
   extension: string;
   size_bytes: number;
+  duration_seconds: number;
 }
 
 export interface Playlist {
