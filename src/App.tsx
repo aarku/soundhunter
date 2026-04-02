@@ -16,8 +16,26 @@ import {
   ChevronDown,
   Music,
   Star,
+  GripVertical,
 } from "lucide-react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import {
+  DndContext,
+  DragOverlay,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragStartEvent,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  verticalListSortingStrategy,
+  useSortable,
+  arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -25,6 +43,66 @@ import { Waveform } from "@/components/Waveform";
 import { useAudioPreview } from "@/hooks/useAudioPreview";
 import * as api from "@/hooks/useTauri";
 import type { SearchResult, Playlist } from "@/hooks/useTauri";
+
+function SortablePlaylistItem({
+  item,
+  currentlyPlaying,
+  play,
+  stop,
+  onRemove,
+}: {
+  item: string;
+  currentlyPlaying: string | null;
+  play: (path: string) => void;
+  stop: () => void;
+  onRemove: (path: string) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: item });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  const name = item.split(/[/\\]/).pop() || item;
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="flex items-center gap-1 px-1 py-0.5 rounded text-xs hover:bg-accent group/item"
+      onMouseEnter={() => play(item)}
+      onMouseLeave={() => stop()}
+    >
+      <button
+        className="cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground shrink-0 p-0.5"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="w-3 h-3" />
+      </button>
+      <Volume2
+        className={`w-3 h-3 shrink-0 ${
+          currentlyPlaying === item ? "text-primary" : "text-muted-foreground"
+        }`}
+      />
+      <span className="truncate flex-1" title={item}>
+        {name}
+      </span>
+      <button
+        className="opacity-0 group-hover/item:opacity-100 text-muted-foreground hover:text-destructive shrink-0"
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove(item);
+        }}
+      >
+        <X className="w-3 h-3" />
+      </button>
+    </div>
+  );
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return bytes + " B";
@@ -50,6 +128,35 @@ function App() {
   const { play, stop, currentlyPlaying } = useAudioPreview();
   const searchTimeoutRef = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const [draggedItem, setDraggedItem] = useState<string | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  );
+
+  const handleDragStart = useCallback((event: DragStartEvent) => {
+    setDraggedItem(event.active.id as string);
+  }, []);
+
+  const handleDragEnd = useCallback(
+    async (event: DragEndEvent) => {
+      setDraggedItem(null);
+      const { active, over } = event;
+      if (!over || !activePlaylist) return;
+
+      // Reorder within playlist
+      if (active.id !== over.id && playlistItems.includes(active.id as string)) {
+        const oldIndex = playlistItems.indexOf(active.id as string);
+        const newIndex = playlistItems.indexOf(over.id as string);
+        if (oldIndex !== -1 && newIndex !== -1) {
+          const newItems = arrayMove(playlistItems, oldIndex, newIndex);
+          setPlaylistItems(newItems);
+          await api.reorderPlaylist(activePlaylist, newItems);
+        }
+      }
+    },
+    [activePlaylist, playlistItems]
+  );
 
   // Load initial data
   useEffect(() => {
@@ -284,6 +391,12 @@ function App() {
           )}
 
           {sidebarView === "playlists" && (
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragStart={handleDragStart}
+              onDragEnd={handleDragEnd}
+            >
             <div className="p-3 space-y-2">
               <div className="flex gap-1">
                 <Input
@@ -334,44 +447,36 @@ function App() {
                     </div>
 
                     {activePlaylist === pl.id && playlistItems.length > 0 && (
-                      <div className="ml-4 space-y-0.5 mt-1">
-                        {playlistItems.map((item) => {
-                          const name = item.split(/[/\\]/).pop() || item;
-                          return (
-                            <div
+                      <div className="ml-2 space-y-0.5 mt-1">
+                        <SortableContext
+                          items={playlistItems}
+                          strategy={verticalListSortingStrategy}
+                        >
+                          {playlistItems.map((item) => (
+                            <SortablePlaylistItem
                               key={item}
-                              className="flex items-center gap-1 px-2 py-0.5 rounded text-xs hover:bg-accent group/item cursor-pointer"
-                              onMouseEnter={() => play(item)}
-                              onMouseLeave={() => stop()}
-                            >
-                              <Volume2
-                                className={`w-3 h-3 shrink-0 ${
-                                  currentlyPlaying === item
-                                    ? "text-primary"
-                                    : "text-muted-foreground"
-                                }`}
-                              />
-                              <span className="truncate flex-1" title={item}>
-                                {name}
-                              </span>
-                              <button
-                                className="opacity-0 group-hover/item:opacity-100 text-muted-foreground hover:text-destructive"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleRemoveFromPlaylist(item);
-                                }}
-                              >
-                                <X className="w-3 h-3" />
-                              </button>
-                            </div>
-                          );
-                        })}
+                              item={item}
+                              currentlyPlaying={currentlyPlaying}
+                              play={play}
+                              stop={stop}
+                              onRemove={handleRemoveFromPlaylist}
+                            />
+                          ))}
+                        </SortableContext>
                       </div>
                     )}
                   </div>
                 ))}
               </div>
             </div>
+            <DragOverlay>
+              {draggedItem && (
+                <div className="px-2 py-1 rounded bg-accent text-xs font-medium shadow-lg border border-border">
+                  {draggedItem.split(/[/\\]/).pop()}
+                </div>
+              )}
+            </DragOverlay>
+            </DndContext>
           )}
 
           {sidebarView === "search" && (

@@ -84,6 +84,10 @@ export async function getPlaylistItems(playlistId: string): Promise<string[]> {
   return invoke("get_playlist_items", { playlistId });
 }
 
+export async function reorderPlaylist(playlistId: string, items: string[]): Promise<void> {
+  return invoke("reorder_playlist", { playlistId, items });
+}
+
 export async function getAudioMetadata(path: string): Promise<AudioMetadata> {
   return invoke("get_audio_metadata", { path });
 }

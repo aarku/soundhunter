@@ -39,6 +39,7 @@ pub fn run() {
             commands::add_to_playlist,
             commands::remove_from_playlist,
             commands::get_playlist_items,
+            commands::reorder_playlist,
             commands::get_audio_metadata,
         ])
         .run(tauri::generate_context!())
@@ -192,6 +193,17 @@ mod commands {
     ) -> Result<Vec<String>, String> {
         let s = state.lock().map_err(|e| e.to_string())?;
         s.get_playlist_items(&playlist_id)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub fn reorder_playlist(
+        state: State<'_, Mutex<AppState>>,
+        playlist_id: String,
+        items: Vec<String>,
+    ) -> Result<(), String> {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.reorder_playlist(&playlist_id, items)
             .map_err(|e| e.to_string())
     }
 

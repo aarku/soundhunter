@@ -197,4 +197,16 @@ impl AppState {
             Err("Playlist not found".into())
         }
     }
+
+    pub fn reorder_playlist(
+        &mut self,
+        playlist_id: &str,
+        items: Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(p) = self.playlists.iter_mut().find(|p| p.id == playlist_id) {
+            p.items = items;
+        }
+        self.save()?;
+        Ok(())
+    }
 }
