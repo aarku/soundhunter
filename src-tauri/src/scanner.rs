@@ -141,49 +141,68 @@ fn tokenize_filename(name: &str) -> Vec<String> {
 /// "3maze - Interference" -> "Interference"
 /// "Sonniss.com - GDC 2019 - Game Audio Bundle" -> "GDC 2019 - Game Audio Bundle"
 /// If there's no " - " separator, returns the original string unchanged.
-/// Get duration of a WAV file from its header without reading the whole file.
+/// Get duration of a WAV file by walking chunks properly.
+/// Handles files with JUNK/bext/other chunks before fmt.
 fn get_wav_duration(path: &str) -> Result<f32, Box<dyn std::error::Error>> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut file = std::fs::File::open(path)?;
-    let mut header = [0u8; 44];
-    file.read_exact(&mut header)?;
+    let mut riff_header = [0u8; 12];
+    file.read_exact(&mut riff_header)?;
 
-    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+    if &riff_header[0..4] != b"RIFF" || &riff_header[8..12] != b"WAVE" {
         return Ok(0.0);
     }
 
-    let num_channels = u16::from_le_bytes([header[22], header[23]]) as u32;
-    let sample_rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
-    let bits_per_sample = u16::from_le_bytes([header[34], header[35]]) as u32;
+    let mut num_channels: u32 = 0;
+    let mut sample_rate: u32 = 0;
+    let mut bits_per_sample: u32 = 0;
+    let mut data_size: u32 = 0;
 
-    if sample_rate == 0 || num_channels == 0 || bits_per_sample == 0 {
-        return Ok(0.0);
-    }
-
-    // Find "data" chunk to get actual data size
-    file.seek(SeekFrom::Start(12))?;
     let mut chunk_header = [0u8; 8];
     loop {
         if file.read_exact(&mut chunk_header).is_err() {
             break;
         }
-        let chunk_id = &chunk_header[0..4];
+        let chunk_id = [chunk_header[0], chunk_header[1], chunk_header[2], chunk_header[3]];
         let chunk_size = u32::from_le_bytes([
             chunk_header[4], chunk_header[5], chunk_header[6], chunk_header[7],
         ]);
-        if chunk_id == b"data" {
-            let bytes_per_frame = num_channels * bits_per_sample / 8;
-            if bytes_per_frame > 0 {
-                let total_frames = chunk_size / bytes_per_frame;
-                return Ok(total_frames as f32 / sample_rate as f32);
+
+        if &chunk_id == b"fmt " {
+            let mut fmt = vec![0u8; chunk_size.min(40) as usize];
+            file.read_exact(&mut fmt)?;
+            if fmt.len() >= 16 {
+                num_channels = u16::from_le_bytes([fmt[2], fmt[3]]) as u32;
+                sample_rate = u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]]);
+                bits_per_sample = u16::from_le_bytes([fmt[14], fmt[15]]) as u32;
             }
+            // Skip any remaining fmt bytes
+            let remaining = chunk_size as usize - fmt.len();
+            if remaining > 0 {
+                file.seek(SeekFrom::Current(remaining as i64))?;
+            }
+        } else if &chunk_id == b"data" {
+            data_size = chunk_size;
             break;
+        } else {
+            // Skip unknown chunk, align to even boundary
+            let skip = if chunk_size % 2 == 1 { chunk_size + 1 } else { chunk_size };
+            file.seek(SeekFrom::Current(skip as i64))?;
         }
-        file.seek(SeekFrom::Current(chunk_size as i64))?;
     }
 
-    Ok(0.0)
+    if sample_rate == 0 || num_channels == 0 || bits_per_sample == 0 || data_size == 0 {
+        return Ok(0.0);
+    }
+
+    let bytes_per_frame = num_channels * bits_per_sample / 8;
+    if bytes_per_frame == 0 {
+        return Ok(0.0);
+    }
+
+    let total_frames = data_size / bytes_per_frame;
+    Ok(total_frames as f32 / sample_rate as f32)
 }
 
 /// Generate waveform peaks by seeking across a WAV file.
@@ -197,52 +216,57 @@ pub fn generate_waveform_peaks(
     let mut file = std::fs::File::open(path)?;
     let file_size = file.metadata()?.len() as usize;
 
-    if file_size < 44 {
+    if file_size < 12 {
         return Ok(vec![0.5; bar_count]);
     }
 
-    // Read WAV header
-    let mut header = [0u8; 44];
-    file.read_exact(&mut header)?;
+    // Read RIFF header
+    let mut riff_header = [0u8; 12];
+    file.read_exact(&mut riff_header)?;
 
-    // Parse basic WAV info
-    let riff = &header[0..4];
-    if riff != b"RIFF" {
-        // Not a WAV - return flat waveform
+    if &riff_header[0..4] != b"RIFF" || &riff_header[8..12] != b"WAVE" {
         return Ok(vec![0.5; bar_count]);
     }
 
-    let num_channels = u16::from_le_bytes([header[22], header[23]]) as usize;
-    let bits_per_sample = u16::from_le_bytes([header[34], header[35]]) as usize;
-    let bytes_per_sample = bits_per_sample / 8;
-    let frame_size = bytes_per_sample * num_channels;
-
-    // Find "data" chunk
-    let mut data_start: usize = 12;
+    // Walk chunks to find fmt and data
+    let mut num_channels: usize = 0;
+    let mut bits_per_sample: usize = 0;
+    let mut data_start: usize = 0;
     let mut data_size: usize = 0;
-    file.seek(SeekFrom::Start(12))?;
 
     let mut chunk_header = [0u8; 8];
     loop {
         if file.read_exact(&mut chunk_header).is_err() {
             break;
         }
-        let chunk_id = &chunk_header[0..4];
+        let chunk_id = [chunk_header[0], chunk_header[1], chunk_header[2], chunk_header[3]];
         let chunk_size = u32::from_le_bytes([
-            chunk_header[4],
-            chunk_header[5],
-            chunk_header[6],
-            chunk_header[7],
+            chunk_header[4], chunk_header[5], chunk_header[6], chunk_header[7],
         ]) as usize;
 
-        if chunk_id == b"data" {
+        if &chunk_id == b"fmt " {
+            let mut fmt = vec![0u8; chunk_size.min(40)];
+            file.read_exact(&mut fmt)?;
+            if fmt.len() >= 16 {
+                num_channels = u16::from_le_bytes([fmt[2], fmt[3]]) as usize;
+                bits_per_sample = u16::from_le_bytes([fmt[14], fmt[15]]) as usize;
+            }
+            let remaining = chunk_size - fmt.len();
+            if remaining > 0 {
+                file.seek(SeekFrom::Current(remaining as i64))?;
+            }
+        } else if &chunk_id == b"data" {
             data_start = file.stream_position()? as usize;
             data_size = chunk_size;
             break;
+        } else {
+            let skip = if chunk_size % 2 == 1 { chunk_size + 1 } else { chunk_size };
+            file.seek(SeekFrom::Current(skip as i64))?;
         }
-        // Skip chunk
-        file.seek(SeekFrom::Current(chunk_size as i64))?;
     }
+
+    let bytes_per_sample = bits_per_sample / 8;
+    let frame_size = bytes_per_sample * num_channels;
 
     if data_size == 0 || frame_size == 0 {
         return Ok(vec![0.5; bar_count]);
