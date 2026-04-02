@@ -43,6 +43,8 @@ pub fn run() {
             commands::reorder_playlist,
             commands::get_audio_metadata,
             commands::generate_waveform,
+            commands::embed_next_file,
+            commands::refresh_embeddings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -214,6 +216,25 @@ mod commands {
         path: String,
     ) -> Result<super::scanner::AudioMetadata, String> {
         super::scanner::get_metadata(&path).map_err(|e| e.to_string())
+    }
+
+    /// Embed the next unprocessed audio file with CLAP.
+    /// Returns (done, remaining) so frontend can show progress.
+    #[tauri::command]
+    pub fn embed_next_file(
+        state: State<'_, Mutex<AppState>>,
+    ) -> Result<(usize, usize), String> {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.embed_next_file().map_err(|e| e.to_string())
+    }
+
+    /// Refresh search engine with latest CLAP embeddings.
+    #[tauri::command]
+    pub fn refresh_embeddings(
+        state: State<'_, Mutex<AppState>>,
+    ) -> Result<(), String> {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.refresh_embeddings().map_err(|e| e.to_string())
     }
 
     /// Generate waveform peaks by seeking across a WAV file.

@@ -89,6 +89,14 @@ export async function reorderPlaylist(playlistId: string, items: string[]): Prom
   return invoke("reorder_playlist", { playlistId, items });
 }
 
+export async function embedNextFile(): Promise<[number, number]> {
+  return invoke("embed_next_file");
+}
+
+export async function refreshEmbeddings(): Promise<void> {
+  return invoke("refresh_embeddings");
+}
+
 export async function getAudioMetadata(path: string): Promise<AudioMetadata> {
   return invoke("get_audio_metadata", { path });
 }

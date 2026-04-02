@@ -140,6 +140,7 @@ impl AppState {
         self.folders.clone()
     }
 
+    /// Fast scan: keyword index only. Returns immediately.
     pub fn scan_and_index(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
         let mut all_files = Vec::new();
         for folder in &self.folders {
@@ -149,33 +150,7 @@ impl AppState {
 
         let count = all_files.len();
 
-        // Compute CLAP audio embeddings for new files
-        self.ensure_clap()?;
-        if let Some(ref mut clap) = self.clap_engine {
-            let mut new_count = 0;
-            for file in &all_files {
-                if !self.embedding_cache.embeddings.contains_key(&file.path) {
-                    match clap.embed_audio(&file.path) {
-                        Ok(embedding) => {
-                            self.embedding_cache.embeddings.insert(file.path.clone(), embedding);
-                            new_count += 1;
-                            if new_count % 10 == 0 {
-                                eprintln!("Embedded {}/{} audio files...", new_count, count);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to embed {}: {}", file.path, e);
-                        }
-                    }
-                }
-            }
-            if new_count > 0 {
-                eprintln!("Embedded {} new audio files.", new_count);
-                self.save_embedding_cache()?;
-            }
-        }
-
-        // Build file_paths + embeddings vectors for search engine
+        // Use any existing CLAP embeddings from cache
         let mut audio_embeddings: Vec<Vec<f32>> = Vec::new();
         let mut audio_paths: Vec<String> = Vec::new();
         for file in &all_files {
@@ -188,6 +163,73 @@ impl AppState {
         self.search_engine.reindex(&all_files, &audio_paths, &audio_embeddings)?;
         self.file_count = count;
         Ok(count)
+    }
+
+    /// Embed one audio file with CLAP. Returns (done_count, total_needing_embedding).
+    /// Call repeatedly to embed all files incrementally.
+    pub fn embed_next_file(&mut self) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+        self.ensure_clap()?;
+
+        // Find files needing embedding
+        let mut all_paths = Vec::new();
+        for folder in &self.folders {
+            let files = scanner::scan_folder(folder);
+            for f in files {
+                all_paths.push(f.path);
+            }
+        }
+
+        let needing: Vec<String> = all_paths
+            .into_iter()
+            .filter(|p| !self.embedding_cache.embeddings.contains_key(p))
+            .collect();
+
+        let total = needing.len();
+        if total == 0 {
+            return Ok((0, 0));
+        }
+
+        // Embed just the first one
+        let path = &needing[0];
+        if let Some(ref mut clap) = self.clap_engine {
+            match clap.embed_audio(path) {
+                Ok(embedding) => {
+                    self.embedding_cache.embeddings.insert(path.clone(), embedding);
+                    self.save_embedding_cache()?;
+                }
+                Err(e) => {
+                    eprintln!("Failed to embed {}: {}", path, e);
+                    // Store empty embedding so we don't retry
+                    self.embedding_cache.embeddings.insert(path.clone(), Vec::new());
+                    self.save_embedding_cache()?;
+                }
+            }
+        }
+
+        Ok((1, total))
+    }
+
+    /// Refresh search engine with latest embeddings from cache.
+    pub fn refresh_embeddings(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut all_files = Vec::new();
+        for folder in &self.folders {
+            let files = scanner::scan_folder(folder);
+            all_files.extend(files);
+        }
+
+        let mut audio_embeddings: Vec<Vec<f32>> = Vec::new();
+        let mut audio_paths: Vec<String> = Vec::new();
+        for file in &all_files {
+            if let Some(emb) = self.embedding_cache.embeddings.get(&file.path) {
+                if !emb.is_empty() {
+                    audio_paths.push(file.path.clone());
+                    audio_embeddings.push(emb.clone());
+                }
+            }
+        }
+
+        self.search_engine.reindex(&all_files, &audio_paths, &audio_embeddings)?;
+        Ok(())
     }
 
     pub fn search(

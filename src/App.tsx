@@ -189,11 +189,41 @@ function App() {
   const [toast, setToast] = useState<string | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
 
+  const [embeddingProgress, setEmbeddingProgress] = useState<string | null>(null);
+
   const showToast = useCallback((message: string) => {
     setToast(message);
     if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     toastTimeoutRef.current = window.setTimeout(() => setToast(null), 3000);
   }, []);
+
+  // Background CLAP embedding loop
+  const startEmbeddingLoop = useCallback(async () => {
+    let totalRemaining = 1;
+    let embedded = 0;
+    while (totalRemaining > 0) {
+      try {
+        const [done, remaining] = await api.embedNextFile();
+        totalRemaining = remaining - done;
+        embedded += done;
+        if (remaining > 0) {
+          setEmbeddingProgress(`Analyzing audio ${embedded}/${embedded + totalRemaining}...`);
+        }
+        // Refresh search engine every 10 files so new results appear incrementally
+        if (embedded > 0 && embedded % 10 === 0) {
+          await api.refreshEmbeddings();
+        }
+      } catch (e) {
+        console.error("Embedding error:", e);
+        break;
+      }
+    }
+    if (embedded > 0) {
+      await api.refreshEmbeddings();
+      showToast(`Analyzed ${embedded} audio files for semantic search`);
+    }
+    setEmbeddingProgress(null);
+  }, [showToast]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
@@ -244,10 +274,13 @@ function App() {
     [activePlaylist, playlistItems]
   );
 
-  // Load initial data
+  // Load initial data + resume background embedding if needed
   useEffect(() => {
     api.getFolders().then(setFolders).catch(console.error);
-    api.getStats().then(setStats).catch(console.error);
+    api.getStats().then((s) => {
+      setStats(s);
+      if (s.total_files > 0) startEmbeddingLoop();
+    }).catch(console.error);
     api.getPlaylists().then(setPlaylists).catch(console.error);
   }, []);
 
@@ -285,15 +318,16 @@ function App() {
     if (selected) {
       const newFolders = await api.addFolder(selected as string);
       setFolders(newFolders);
-      // Auto-scan after adding
       setIsScanning(true);
       try {
-        const count = await api.scanFolders();
+        await api.scanFolders();
         const s = await api.getStats();
         setStats(s);
       } finally {
         setIsScanning(false);
       }
+      // Start CLAP embedding in background
+      startEmbeddingLoop();
     }
   }, []);
 
@@ -313,7 +347,8 @@ function App() {
     } finally {
       setIsScanning(false);
     }
-  }, []);
+    startEmbeddingLoop();
+  }, [startEmbeddingLoop]);
 
   const handleReveal = useCallback((path: string) => {
     api.revealInExplorer(path).catch(console.error);
@@ -479,6 +514,12 @@ function App() {
               <div className="text-xs text-muted-foreground pt-2 border-t border-border">
                 {stats.total_files} files in {stats.total_folders} folders
               </div>
+              {embeddingProgress && (
+                <div className="text-xs text-primary flex items-center gap-1">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  {embeddingProgress}
+                </div>
+              )}
             </div>
           )}
 

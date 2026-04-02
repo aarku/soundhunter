@@ -104,7 +104,6 @@ impl ClapEngine {
     pub fn embed_audio(&mut self, path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
         let samples = self.load_audio_mono_48k(path)?;
 
-        let is_longer = samples.len() > MAX_SAMPLES;
         let padded = if samples.len() >= MAX_SAMPLES {
             samples[..MAX_SAMPLES].to_vec()
         } else {
@@ -120,11 +119,9 @@ impl ClapEngine {
         let time_steps = mel.len() / N_MELS;
 
         let mel_array = Array::from_shape_vec((1, 1, time_steps, N_MELS), mel)?;
-        let is_longer_array = Array::from_vec(vec![if is_longer { 1i64 } else { 0i64 }]);
 
         let outputs = self.audio_session.run(ort::inputs![
             "input_features" => Value::from_array(mel_array)?,
-            "is_longer" => Value::from_array(is_longer_array)?,
         ])?;
 
         let value = outputs.iter().next().map(|(_, v)| v).ok_or("No output")?;
