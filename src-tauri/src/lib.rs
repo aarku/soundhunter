@@ -4,6 +4,7 @@ mod search;
 mod state;
 mod synonyms;
 
+use clap::ClapEngine;
 use state::AppState;
 use std::sync::Mutex;
 use tauri::Manager;
@@ -21,8 +22,11 @@ pub fn run() {
                 .expect("failed to resolve app data dir");
             std::fs::create_dir_all(&data_dir).ok();
 
-            let app_state = AppState::new(data_dir).expect("failed to initialize app state");
+            let app_state = AppState::new(data_dir.clone()).expect("failed to initialize app state");
             app.manage(Mutex::new(app_state));
+            // ClapEngine managed separately so embedding doesn't block everything
+            app.manage(Mutex::new(None::<ClapEngine>));
+            app.manage(data_dir);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -90,11 +94,24 @@ mod commands {
     #[tauri::command]
     pub fn search(
         state: State<'_, Mutex<AppState>>,
+        clap_state: State<'_, Mutex<Option<super::clap::ClapEngine>>>,
         query: String,
         limit: Option<usize>,
     ) -> Result<Vec<super::search::SearchResult>, String> {
-        let mut s = state.lock().map_err(|e| e.to_string())?;
-        s.search(&query, limit.unwrap_or(200))
+        // Try to get CLAP text embedding (non-blocking: skip if clap lock is held)
+        let query_embedding = match clap_state.try_lock() {
+            Ok(mut clap_lock) => {
+                if let Some(ref mut clap) = *clap_lock {
+                    clap.embed_text(&query).ok()
+                } else {
+                    None
+                }
+            }
+            Err(_) => None, // CLAP is busy embedding audio, skip semantic search
+        };
+
+        let s = state.lock().map_err(|e| e.to_string())?;
+        s.search(&query, limit.unwrap_or(200), query_embedding.as_deref())
             .map_err(|e| e.to_string())
     }
 
@@ -219,13 +236,57 @@ mod commands {
     }
 
     /// Embed the next unprocessed audio file with CLAP.
-    /// Returns (done, remaining) so frontend can show progress.
+    /// Holds the ClapEngine lock during embedding, NOT the AppState lock.
     #[tauri::command]
     pub fn embed_next_file(
         state: State<'_, Mutex<AppState>>,
+        clap_state: State<'_, Mutex<Option<super::clap::ClapEngine>>>,
+        data_dir: State<'_, std::path::PathBuf>,
     ) -> Result<(usize, usize), String> {
-        let mut s = state.lock().map_err(|e| e.to_string())?;
-        s.embed_next_file().map_err(|e| e.to_string())
+        // 1. Get the next file path needing embedding (quick lock)
+        let path_to_embed = {
+            let s = state.lock().map_err(|e| e.to_string())?;
+            s.next_unembedded_path()
+        };
+
+        let path = match path_to_embed {
+            Some(p) => p,
+            None => return Ok((0, 0)),
+        };
+
+        // 2. Ensure CLAP is initialized (separate lock, only blocks other embeddings)
+        {
+            let mut clap_lock = clap_state.lock().map_err(|e| e.to_string())?;
+            if clap_lock.is_none() {
+                eprintln!("Initializing CLAP engine...");
+                *clap_lock = Some(
+                    super::clap::ClapEngine::new(&data_dir)
+                        .map_err(|e| e.to_string())?,
+                );
+                eprintln!("CLAP engine ready.");
+            }
+        }
+
+        // 3. Embed the file (holds clap lock, NOT app state lock)
+        let embedding = {
+            let mut clap_lock = clap_state.lock().map_err(|e| e.to_string())?;
+            let clap = clap_lock.as_mut().unwrap();
+            match clap.embed_audio(&path) {
+                Ok(emb) => emb,
+                Err(e) => {
+                    eprintln!("Failed to embed {}: {}", path, e);
+                    Vec::new() // empty = failed, won't retry
+                }
+            }
+        };
+
+        // 4. Store result (quick lock)
+        let remaining = {
+            let mut s = state.lock().map_err(|e| e.to_string())?;
+            s.store_embedding(path, embedding).map_err(|e| e.to_string())?
+        };
+
+        Ok((1, remaining))
     }
 
     /// Refresh search engine with latest CLAP embeddings.

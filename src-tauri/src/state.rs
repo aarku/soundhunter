@@ -1,4 +1,3 @@
-use crate::clap::ClapEngine;
 use crate::scanner;
 use crate::search::{SearchEngine, SearchResult};
 use serde::{Deserialize, Serialize};
@@ -36,7 +35,6 @@ pub struct AppState {
     playlists: Vec<Playlist>,
     search_engine: SearchEngine,
     file_count: usize,
-    clap_engine: Option<ClapEngine>,
     embedding_cache: EmbeddingCache,
 }
 
@@ -55,18 +53,8 @@ impl AppState {
             search_engine,
             file_count,
             data_dir,
-            clap_engine: None,
             embedding_cache,
         })
-    }
-
-    fn ensure_clap(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.clap_engine.is_none() {
-            eprintln!("Initializing CLAP engine...");
-            self.clap_engine = Some(ClapEngine::new(&self.data_dir)?);
-            eprintln!("CLAP engine ready.");
-        }
-        Ok(())
     }
 
     fn embedding_cache_path(data_dir: &PathBuf) -> PathBuf {
@@ -165,48 +153,35 @@ impl AppState {
         Ok(count)
     }
 
-    /// Embed one audio file with CLAP. Returns (done_count, total_needing_embedding).
-    /// Call repeatedly to embed all files incrementally.
-    pub fn embed_next_file(&mut self) -> Result<(usize, usize), Box<dyn std::error::Error>> {
-        self.ensure_clap()?;
-
-        // Find files needing embedding
-        let mut all_paths = Vec::new();
+    /// Get the next file path that hasn't been embedded yet. Quick operation.
+    pub fn next_unembedded_path(&self) -> Option<String> {
         for folder in &self.folders {
             let files = scanner::scan_folder(folder);
             for f in files {
-                all_paths.push(f.path);
-            }
-        }
-
-        let needing: Vec<String> = all_paths
-            .into_iter()
-            .filter(|p| !self.embedding_cache.embeddings.contains_key(p))
-            .collect();
-
-        let total = needing.len();
-        if total == 0 {
-            return Ok((0, 0));
-        }
-
-        // Embed just the first one
-        let path = &needing[0];
-        if let Some(ref mut clap) = self.clap_engine {
-            match clap.embed_audio(path) {
-                Ok(embedding) => {
-                    self.embedding_cache.embeddings.insert(path.clone(), embedding);
-                    self.save_embedding_cache()?;
-                }
-                Err(e) => {
-                    eprintln!("Failed to embed {}: {}", path, e);
-                    // Store empty embedding so we don't retry
-                    self.embedding_cache.embeddings.insert(path.clone(), Vec::new());
-                    self.save_embedding_cache()?;
+                if !self.embedding_cache.embeddings.contains_key(&f.path) {
+                    return Some(f.path);
                 }
             }
         }
+        None
+    }
 
-        Ok((1, total))
+    /// Store an embedding result and return the count of remaining unembedded files.
+    pub fn store_embedding(&mut self, path: String, embedding: Vec<f32>) -> Result<usize, Box<dyn std::error::Error>> {
+        self.embedding_cache.embeddings.insert(path, embedding);
+        self.save_embedding_cache()?;
+
+        // Count remaining
+        let mut remaining = 0;
+        for folder in &self.folders {
+            let files = scanner::scan_folder(folder);
+            for f in files {
+                if !self.embedding_cache.embeddings.contains_key(&f.path) {
+                    remaining += 1;
+                }
+            }
+        }
+        Ok(remaining)
     }
 
     /// Refresh search engine with latest embeddings from cache.
@@ -233,18 +208,12 @@ impl AppState {
     }
 
     pub fn search(
-        &mut self,
+        &self,
         query: &str,
         limit: usize,
+        query_embedding: Option<&[f32]>,
     ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
-        // Get CLAP text embedding for semantic search
-        let query_embedding = if let Some(ref mut clap) = self.clap_engine {
-            clap.embed_text(query).ok()
-        } else {
-            None
-        };
-
-        self.search_engine.search(query, limit, query_embedding.as_deref())
+        self.search_engine.search(query, limit, query_embedding)
     }
 
     pub fn get_stats(&self) -> Stats {
