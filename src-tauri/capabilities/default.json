@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "dialog:allow-open",
+    {
+      "identifier": "core:event:allow-emit-to",
+      "allow": [{ "channel": "*" }]
+    },
+    {
+      "identifier": "core:event:allow-listen",
+      "allow": [{ "channel": "*" }]
+    }
+  ]
+}
