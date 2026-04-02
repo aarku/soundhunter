@@ -8,6 +8,8 @@ interface WaveformProps {
   isPlaying?: boolean;
   /** 0.0 - 1.0 playback progress */
   progress?: number;
+  /** Called with 0.0-1.0 position when user clicks on the waveform */
+  onSeek?: (position: number) => void;
   className?: string;
 }
 
@@ -16,10 +18,11 @@ const waveformCache = new Map<string, number[]>();
 
 export function Waveform({
   filePath,
-  width = 80,
+  width = 240,
   height = 24,
   isPlaying = false,
   progress = 0,
+  onSeek,
   className = "",
 }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -114,9 +117,22 @@ export function Waveform({
     }
   }, [bars, width, height, isPlaying, progress]);
 
+  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!onSeek) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const position = Math.max(0, Math.min(1, x / rect.width));
+    onSeek(position);
+    e.stopPropagation();
+  };
+
   return (
     <div ref={containerRef} className={className} style={{ width, height }}>
-      <canvas ref={canvasRef} style={{ width, height }} />
+      <canvas
+        ref={canvasRef}
+        style={{ width, height, cursor: onSeek ? "pointer" : undefined }}
+        onClick={handleClick}
+      />
     </div>
   );
 }

@@ -90,9 +90,17 @@ export function useAudioPreview() {
     [stop, stopRaf, startRaf]
   );
 
+  const seek = useCallback((position: number) => {
+    const audio = audioRef.current;
+    if (audio && audio.duration > 0) {
+      audio.currentTime = position * audio.duration;
+      setProgress(position);
+    }
+  }, []);
+
   useEffect(() => {
     return () => { stop(); };
   }, [stop]);
 
-  return { play, stop, currentlyPlaying, progress };
+  return { play, stop, seek, currentlyPlaying, progress };
 }

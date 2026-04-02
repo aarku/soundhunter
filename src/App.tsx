@@ -181,7 +181,7 @@ function App() {
   const [playlistItems, setPlaylistItems] = useState<string[]>([]);
   const [newPlaylistName, setNewPlaylistName] = useState("");
 
-  const { play, stop, currentlyPlaying, progress } = useAudioPreview();
+  const { play, stop, seek, currentlyPlaying, progress } = useAudioPreview();
   const searchTimeoutRef = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
@@ -655,10 +655,11 @@ function App() {
                 {/* Waveform */}
                 <Waveform
                   filePath={result.path}
-                  width={80}
+                  width={240}
                   height={24}
                   isPlaying={currentlyPlaying === result.path}
                   progress={currentlyPlaying === result.path ? progress : 0}
+                  onSeek={currentlyPlaying === result.path ? seek : undefined}
                   className="shrink-0 hidden sm:block"
                 />
 
