@@ -73,6 +73,7 @@ export function useAudioPreview() {
           audio.currentTime = 0;
           setProgress(0);
           audio.play().catch(() => {});
+          startRaf();
         }
       };
 
