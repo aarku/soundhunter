@@ -10,6 +10,7 @@ interface WaveformProps {
   progress?: number;
   /** Called with 0.0-1.0 position when user clicks on the waveform */
   onSeek?: (position: number) => void;
+  onMouseEnter?: () => void;
   className?: string;
 }
 
@@ -23,6 +24,7 @@ export function Waveform({
   isPlaying = false,
   progress = 0,
   onSeek,
+  onMouseEnter,
   className = "",
 }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -127,7 +129,7 @@ export function Waveform({
   };
 
   return (
-    <div ref={containerRef} className={className} style={{ width, height }}>
+    <div ref={containerRef} className={className} style={{ width, height }} onMouseEnter={onMouseEnter}>
       <canvas
         ref={canvasRef}
         style={{ width, height, cursor: onSeek ? "pointer" : undefined }}

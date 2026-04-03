@@ -694,7 +694,6 @@ function App() {
                 className={`px-4 py-2 flex items-center gap-3 hover:bg-accent/50 cursor-pointer transition-colors group w-full ${
                   currentlyPlaying === result.path ? "bg-primary/10" : ""
                 }`}
-                onMouseEnter={() => play(result.path)}
                 onMouseLeave={() => stop()}
                 onContextMenu={(e) => {
                   e.preventDefault();
@@ -728,6 +727,7 @@ function App() {
                   isPlaying={currentlyPlaying === result.path}
                   progress={currentlyPlaying === result.path ? progress : 0}
                   onSeek={currentlyPlaying === result.path ? seek : undefined}
+                  onMouseEnter={() => play(result.path)}
                   className="shrink-0 hidden sm:block"
                 />
 
