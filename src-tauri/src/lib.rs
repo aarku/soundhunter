@@ -45,6 +45,7 @@ pub fn run() {
             commands::remove_from_playlist,
             commands::get_playlist_items,
             commands::reorder_playlist,
+            commands::reorder_playlists,
             commands::get_audio_metadata,
             commands::generate_waveform,
             commands::start_embedding,
@@ -226,6 +227,16 @@ mod commands {
         let mut s = state.lock().map_err(|e| e.to_string())?;
         s.reorder_playlist(&playlist_id, items)
             .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub fn reorder_playlists(
+        state: State<'_, Mutex<AppState>>,
+        ids: Vec<String>,
+    ) -> Result<Vec<super::state::Playlist>, String> {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.reorder_playlists(ids).map_err(|e| e.to_string())?;
+        Ok(s.get_playlists())
     }
 
     #[tauri::command]

@@ -107,6 +107,108 @@ function SortablePlaylistItem({
   );
 }
 
+function SortablePlaylistHeader({
+  playlist,
+  isActive,
+  onSelect,
+  onDelete,
+  onRename,
+  children,
+}: {
+  playlist: { id: string; name: string; items: string[] };
+  isActive: boolean;
+  onSelect: () => void;
+  onDelete: () => void;
+  onRename: (name: string) => void;
+  children?: React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: `playlistsort:${playlist.id}` });
+  const { setNodeRef: dropRef, isOver } = useDroppable({
+    id: `playlist:${playlist.id}`,
+    data: { type: "playlist", playlistId: playlist.id },
+  });
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [editName, setEditName] = useState(playlist.name);
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  const handleSubmitRename = () => {
+    if (editName.trim() && editName.trim() !== playlist.name) {
+      onRename(editName.trim());
+    }
+    setIsEditing(false);
+  };
+
+  return (
+    <div ref={setNodeRef} style={style}>
+      <div
+        ref={dropRef}
+        className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer group ${
+          isActive ? "bg-primary/20 text-primary" : "hover:bg-accent"
+        } ${isOver ? "ring-1 ring-primary" : ""}`}
+        onClick={onSelect}
+      >
+        <button
+          className="cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground shrink-0 p-0.5"
+          {...attributes}
+          {...listeners}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <GripVertical className="w-3 h-3" />
+        </button>
+        {isActive ? (
+          <ChevronDown className="w-3 h-3 shrink-0" />
+        ) : (
+          <ChevronRight className="w-3 h-3 shrink-0" />
+        )}
+        <Music className="w-3 h-3 shrink-0" />
+        {isEditing ? (
+          <input
+            className="flex-1 bg-transparent border-b border-primary outline-none text-xs min-w-0"
+            value={editName}
+            onChange={(e) => setEditName(e.target.value)}
+            onBlur={handleSubmitRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleSubmitRename();
+              if (e.key === "Escape") setIsEditing(false);
+            }}
+            onClick={(e) => e.stopPropagation()}
+            autoFocus
+          />
+        ) : (
+          <span
+            className="truncate flex-1"
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setEditName(playlist.name);
+              setIsEditing(true);
+            }}
+          >
+            {playlist.name}
+          </span>
+        )}
+        <span className="text-muted-foreground">{playlist.items.length}</span>
+        <button
+          className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+        >
+          <Trash2 className="w-3 h-3" />
+        </button>
+      </div>
+      {children}
+    </div>
+  );
+}
+
 function DraggableResultRow({
   id,
   children,
@@ -126,28 +228,6 @@ function DraggableResultRow({
       {...attributes}
       className="overflow-hidden"
       style={{ opacity: isDragging ? 0.4 : 1 }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function DroppablePlaylistHeader({
-  playlistId,
-  children,
-}: {
-  playlistId: string;
-  children: React.ReactNode;
-}) {
-  const { setNodeRef, isOver: hovering } = useDroppable({
-    id: `playlist:${playlistId}`,
-    data: { type: "playlist", playlistId },
-  });
-
-  return (
-    <div
-      ref={setNodeRef}
-      className={hovering ? "ring-1 ring-primary rounded" : ""}
     >
       {children}
     </div>
@@ -178,8 +258,8 @@ function App() {
   const [isSearching, setIsSearching] = useState(false);
   const [sidebarView, setSidebarView] = useState<SidebarView>("search");
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
-  const [activePlaylist, setActivePlaylist] = useState<string | null>(null);
-  const [playlistItems, setPlaylistItems] = useState<string[]>([]);
+  const [openPlaylists, setOpenPlaylists] = useState<Set<string>>(new Set());
+  const [playlistItemsMap, setPlaylistItemsMap] = useState<Map<string, string[]>>(new Map());
   const [newPlaylistName, setNewPlaylistName] = useState("");
 
   const { play, stop, seek, currentlyPlaying, progress } = useAudioPreview();
@@ -209,47 +289,6 @@ function App() {
   const handleDragStart = useCallback((event: DragStartEvent) => {
     setDraggedItem(event.active.id as string);
   }, []);
-
-  const handleDragEnd = useCallback(
-    async (event: DragEndEvent) => {
-      setDraggedItem(null);
-      const { active, over } = event;
-      if (!over) return;
-
-      const activeId = active.id as string;
-      const overId = over.id as string;
-
-      // Drag search result onto a playlist header
-      if (activeId.startsWith("search:") && overId.startsWith("playlist:")) {
-        const filePath = active.data.current?.path as string;
-        const playlistId = over.data.current?.playlistId as string;
-        if (filePath && playlistId) {
-          await api.addToPlaylist(playlistId, filePath);
-          // Refresh playlists to update counts
-          const pls = await api.getPlaylists();
-          setPlaylists(pls);
-          if (activePlaylist === playlistId) {
-            const items = await api.getPlaylistItems(playlistId);
-            setPlaylistItems(items);
-          }
-        }
-        return;
-      }
-
-      // Reorder within playlist
-      if (!activePlaylist) return;
-      if (activeId !== overId && playlistItems.includes(activeId)) {
-        const oldIndex = playlistItems.indexOf(activeId);
-        const newIndex = playlistItems.indexOf(overId);
-        if (oldIndex !== -1 && newIndex !== -1) {
-          const newItems = arrayMove(playlistItems, oldIndex, newIndex);
-          setPlaylistItems(newItems);
-          await api.reorderPlaylist(activePlaylist, newItems);
-        }
-      }
-    },
-    [activePlaylist, playlistItems]
-  );
 
   // Listen for embedding progress events from background thread
   useEffect(() => {
@@ -355,41 +394,104 @@ function App() {
     setNewPlaylistName("");
   }, [newPlaylistName]);
 
+  const refreshPlaylistItems = useCallback(async (id: string) => {
+    const items = await api.getPlaylistItems(id);
+    setPlaylistItemsMap((prev) => new Map(prev).set(id, items));
+  }, []);
+
   const handleDeletePlaylist = useCallback(async (id: string) => {
     const pls = await api.deletePlaylist(id);
     setPlaylists(pls);
-    if (activePlaylist === id) {
-      setActivePlaylist(null);
-      setPlaylistItems([]);
-    }
-  }, [activePlaylist]);
+    setOpenPlaylists((prev) => { const s = new Set(prev); s.delete(id); return s; });
+    setPlaylistItemsMap((prev) => { const m = new Map(prev); m.delete(id); return m; });
+  }, []);
 
   const handleSelectPlaylist = useCallback(async (id: string) => {
-    if (activePlaylist === id) {
-      setActivePlaylist(null);
-      setPlaylistItems([]);
-    } else {
-      setActivePlaylist(id);
-      const items = await api.getPlaylistItems(id);
-      setPlaylistItems(items);
+    setOpenPlaylists((prev) => {
+      const s = new Set(prev);
+      if (s.has(id)) { s.delete(id); } else { s.add(id); }
+      return s;
+    });
+    if (!playlistItemsMap.has(id)) {
+      refreshPlaylistItems(id);
     }
-  }, [activePlaylist]);
+  }, [playlistItemsMap, refreshPlaylistItems]);
 
   const handleAddToPlaylist = useCallback(async (playlistId: string, filePath: string) => {
     await api.addToPlaylist(playlistId, filePath);
-    if (activePlaylist === playlistId) {
-      const items = await api.getPlaylistItems(playlistId);
-      setPlaylistItems(items);
+    const pls = await api.getPlaylists();
+    setPlaylists(pls);
+    if (openPlaylists.has(playlistId)) {
+      refreshPlaylistItems(playlistId);
     }
-  }, [activePlaylist]);
+  }, [openPlaylists, refreshPlaylistItems]);
 
-  const handleRemoveFromPlaylist = useCallback(async (filePath: string) => {
-    if (!activePlaylist) return;
-    await api.removeFromPlaylist(activePlaylist, filePath);
-    const items = await api.getPlaylistItems(activePlaylist);
-    setPlaylistItems(items);
-  }, [activePlaylist]);
+  const handleRemoveFromPlaylist = useCallback(async (playlistId: string, filePath: string) => {
+    await api.removeFromPlaylist(playlistId, filePath);
+    const pls = await api.getPlaylists();
+    setPlaylists(pls);
+    refreshPlaylistItems(playlistId);
+  }, [refreshPlaylistItems]);
 
+  const handleRenamePlaylist = useCallback(async (id: string, name: string) => {
+    const pls = await api.renamePlaylist(id, name);
+    setPlaylists(pls);
+  }, []);
+
+  const handleReorderPlaylists = useCallback(async (ids: string[]) => {
+    const pls = await api.reorderPlaylists(ids);
+    setPlaylists(pls);
+  }, []);
+
+  const handleDragEnd = useCallback(
+    async (event: DragEndEvent) => {
+      setDraggedItem(null);
+      const { active, over } = event;
+      if (!over) return;
+
+      const activeId = active.id as string;
+      const overId = over.id as string;
+
+      // Drag search result onto a playlist header
+      if (activeId.startsWith("search:") && overId.startsWith("playlist:")) {
+        const filePath = active.data.current?.path as string;
+        const playlistId = over.data.current?.playlistId as string;
+        if (filePath && playlistId) {
+          handleAddToPlaylist(playlistId, filePath);
+        }
+        return;
+      }
+
+      // Reorder playlists themselves
+      if (activeId.startsWith("playlistsort:") && overId.startsWith("playlistsort:")) {
+        const fromId = activeId.replace("playlistsort:", "");
+        const toId = overId.replace("playlistsort:", "");
+        const oldIndex = playlists.findIndex((p) => p.id === fromId);
+        const newIndex = playlists.findIndex((p) => p.id === toId);
+        if (oldIndex !== -1 && newIndex !== -1 && oldIndex !== newIndex) {
+          const newOrder = arrayMove(playlists, oldIndex, newIndex);
+          setPlaylists(newOrder);
+          handleReorderPlaylists(newOrder.map((p) => p.id));
+        }
+        return;
+      }
+
+      // Reorder items within a playlist
+      for (const [plId, items] of playlistItemsMap) {
+        if (items.includes(activeId) && items.includes(overId)) {
+          const oldIndex = items.indexOf(activeId);
+          const newIndex = items.indexOf(overId);
+          if (oldIndex !== -1 && newIndex !== -1 && oldIndex !== newIndex) {
+            const newItems = arrayMove(items, oldIndex, newIndex);
+            setPlaylistItemsMap((prev) => new Map(prev).set(plId, newItems));
+            await api.reorderPlaylist(plId, newItems);
+          }
+          return;
+        }
+      }
+    },
+    [playlists, playlistItemsMap, handleAddToPlaylist, handleReorderPlaylists]
+  );
 
   // Keyboard shortcut: focus search with Ctrl+K
   useEffect(() => {
@@ -538,58 +640,45 @@ function App() {
               </div>
 
               <div className="space-y-1">
-                {playlists.map((pl) => (
-                  <div key={pl.id}>
-                    <DroppablePlaylistHeader playlistId={pl.id}>
-                    <div
-                      className={`flex items-center gap-1 px-2 py-1 rounded text-xs cursor-pointer group ${
-                        activePlaylist === pl.id
-                          ? "bg-primary/20 text-primary"
-                          : "hover:bg-accent"
-                      }`}
-                      onClick={() => handleSelectPlaylist(pl.id)}
-                    >
-                      {activePlaylist === pl.id ? (
-                        <ChevronDown className="w-3 h-3 shrink-0" />
-                      ) : (
-                        <ChevronRight className="w-3 h-3 shrink-0" />
-                      )}
-                      <Music className="w-3 h-3 shrink-0" />
-                      <span className="truncate flex-1">{pl.name}</span>
-                      <span className="text-muted-foreground">{pl.items.length}</span>
-                      <button
-                        className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeletePlaylist(pl.id);
-                        }}
+                <SortableContext
+                  items={playlists.map((p) => `playlistsort:${p.id}`)}
+                  strategy={verticalListSortingStrategy}
+                >
+                  {playlists.map((pl) => {
+                    const isOpen = openPlaylists.has(pl.id);
+                    const items = playlistItemsMap.get(pl.id) || [];
+                    return (
+                      <SortablePlaylistHeader
+                        key={pl.id}
+                        playlist={pl}
+                        isActive={isOpen}
+                        onSelect={() => handleSelectPlaylist(pl.id)}
+                        onDelete={() => handleDeletePlaylist(pl.id)}
+                        onRename={(name) => handleRenamePlaylist(pl.id, name)}
                       >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
-
-                    {activePlaylist === pl.id && playlistItems.length > 0 && (
-                      <div className="ml-2 space-y-0.5 mt-1">
-                        <SortableContext
-                          items={playlistItems}
-                          strategy={verticalListSortingStrategy}
-                        >
-                          {playlistItems.map((item) => (
-                            <SortablePlaylistItem
-                              key={item}
-                              item={item}
-                              currentlyPlaying={currentlyPlaying}
-                              play={play}
-                              stop={stop}
-                              onRemove={handleRemoveFromPlaylist}
-                            />
-                          ))}
-                        </SortableContext>
-                      </div>
-                    )}
-                    </DroppablePlaylistHeader>
-                  </div>
-                ))}
+                        {isOpen && items.length > 0 && (
+                          <div className="ml-5 space-y-0.5 mt-1">
+                            <SortableContext
+                              items={items}
+                              strategy={verticalListSortingStrategy}
+                            >
+                              {items.map((item) => (
+                                <SortablePlaylistItem
+                                  key={item}
+                                  item={item}
+                                  currentlyPlaying={currentlyPlaying}
+                                  play={play}
+                                  stop={stop}
+                                  onRemove={(path) => handleRemoveFromPlaylist(pl.id, path)}
+                                />
+                              ))}
+                            </SortableContext>
+                          </div>
+                        )}
+                      </SortablePlaylistHeader>
+                    );
+                  })}
+                </SortableContext>
               </div>
             </div>
           )}

@@ -253,15 +253,30 @@ impl AppState {
         Ok(())
     }
 
+    pub fn reorder_playlists(
+        &mut self,
+        ids: Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut reordered = Vec::new();
+        for id in &ids {
+            if let Some(pos) = self.playlists.iter().position(|p| p.id == *id) {
+                reordered.push(self.playlists[pos].clone());
+            }
+        }
+        self.playlists = reordered;
+        self.save()?;
+        Ok(())
+    }
+
     pub fn add_to_playlist(
         &mut self,
         playlist_id: &str,
         file_path: String,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(p) = self.playlists.iter_mut().find(|p| p.id == playlist_id) {
-            if !p.items.contains(&file_path) {
-                p.items.push(file_path);
-            }
+            // Remove from old position if already present (move, not duplicate)
+            p.items.retain(|i| i != &file_path);
+            p.items.push(file_path);
         }
         self.save()?;
         Ok(())

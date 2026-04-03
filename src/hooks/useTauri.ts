@@ -89,6 +89,10 @@ export async function reorderPlaylist(playlistId: string, items: string[]): Prom
   return invoke("reorder_playlist", { playlistId, items });
 }
 
+export async function reorderPlaylists(ids: string[]): Promise<Playlist[]> {
+  return invoke("reorder_playlists", { ids });
+}
+
 export async function startEmbedding(): Promise<void> {
   return invoke("start_embedding");
 }
