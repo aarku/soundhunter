@@ -2,12 +2,11 @@ mod clap;
 mod scanner;
 mod search;
 mod state;
-mod synonyms;
 
 use clap::ClapEngine;
 use state::AppState;
 use std::sync::Mutex;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

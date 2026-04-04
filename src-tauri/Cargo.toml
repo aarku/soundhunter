@@ -21,7 +21,6 @@ tantivy = "0.22"
 fuzzy-matcher = "0.3"
 opener = "0.7"
 tauri-plugin-fs = "2"
-fastembed = "5"
 ort = { version = "2.0.0-rc.11", features = ["load-dynamic"] }
 tokenizers = "0.22"
 rustfft = "6"
