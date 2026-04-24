@@ -2,13 +2,23 @@
 //!
 //! Embeds both audio files and text queries into the same 512-dim vector space
 //! using the LAION CLAP model (Xenova/clap-htsat-unfused quantized ONNX).
+//!
+//! Architecture:
+//!   * `ClapShared`   — immutable, Arc-shared: tokenizer, mel filterbank, model dir.
+//!   * `ClapWorker`   — per-thread: owns its own audio + text ONNX sessions and
+//!                      FFT planner. Not Sync. Each worker thread holds one.
+//!   * `ClapPool`     — manages N audio-embedding workers behind a job channel
+//!                      for parallel batch embedding, plus one text worker
+//!                      behind a mutex for user search queries.
 
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use ndarray::Array;
 use ort::{session::Session, value::Value};
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use rustfft::{num_complex::Complex, FftPlanner};
-use std::path::Path;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use tokenizers::Tokenizer;
 
 const SAMPLE_RATE: usize = 48000;
@@ -20,40 +30,32 @@ const MEL_FMAX: f32 = 14000.0;
 const MAX_LENGTH_S: f32 = 10.0;
 const MAX_SAMPLES: usize = (SAMPLE_RATE as f32 * MAX_LENGTH_S) as usize; // 480000
 
-pub struct ClapEngine {
-    audio_session: Session,
-    text_session: Session,
+/// Rough per-worker memory cost (audio + text quantized models + overhead).
+const APPROX_BYTES_PER_WORKER: u64 = 250 * 1024 * 1024; // 250 MB
+
+/// Immutable state shared by every worker via Arc.
+pub struct ClapShared {
+    model_dir: PathBuf,
     tokenizer: Tokenizer,
     mel_filterbank: Vec<Vec<f32>>,
-    fft_planner: Mutex<FftPlanner<f32>>,
 }
 
-impl ClapEngine {
-    pub fn new(cache_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+impl ClapShared {
+    pub fn new(cache_dir: &Path) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let model_dir = cache_dir.join("clap_model");
         std::fs::create_dir_all(&model_dir)?;
         Self::ensure_models(&model_dir)?;
 
-        let audio_session = Session::builder()?
-            .with_intra_threads(4)?
-            .commit_from_file(model_dir.join("audio_model_quantized.onnx"))?;
-
-        let text_session = Session::builder()?
-            .with_intra_threads(4)?
-            .commit_from_file(model_dir.join("text_model_quantized.onnx"))?;
-
         let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
             .map_err(|e| format!("Failed to load tokenizer: {}", e))?;
 
-        let mel_filterbank = Self::create_mel_filterbank();
+        let mel_filterbank = create_mel_filterbank();
 
-        Ok(Self {
-            audio_session,
-            text_session,
+        Ok(Arc::new(Self {
+            model_dir,
             tokenizer,
             mel_filterbank,
-            fft_planner: Mutex::new(FftPlanner::new()),
-        })
+        }))
     }
 
     fn ensure_models(model_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -77,10 +79,37 @@ impl ClapEngine {
         }
         Ok(())
     }
+}
 
-    /// Embed a text query into CLAP space (512-dim, normalized).
+/// One worker owning its own ONNX sessions. Not Sync: confined to a single thread.
+pub struct ClapWorker {
+    shared: Arc<ClapShared>,
+    audio_session: Session,
+    text_session: Session,
+    fft_planner: FftPlanner<f32>,
+}
+
+impl ClapWorker {
+    /// Build a worker with `intra_threads` internal ONNX threads.
+    pub fn new(shared: Arc<ClapShared>, intra_threads: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        let audio_session = Session::builder()?
+            .with_intra_threads(intra_threads)?
+            .commit_from_file(shared.model_dir.join("audio_model_quantized.onnx"))?;
+
+        let text_session = Session::builder()?
+            .with_intra_threads(intra_threads)?
+            .commit_from_file(shared.model_dir.join("text_model_quantized.onnx"))?;
+
+        Ok(Self {
+            shared,
+            audio_session,
+            text_session,
+            fft_planner: FftPlanner::new(),
+        })
+    }
+
     pub fn embed_text(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        let encoding = self.tokenizer.encode(text, true)
+        let encoding = self.shared.tokenizer.encode(text, true)
             .map_err(|e| format!("Tokenization failed: {}", e))?;
 
         let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
@@ -97,10 +126,9 @@ impl ClapEngine {
 
         let value = outputs.iter().next().map(|(_, v)| v).ok_or("No output")?;
         let (_shape, data) = value.try_extract_tensor::<f32>()?;
-        Ok(Self::normalize(&data.to_vec()))
+        Ok(normalize(&data.to_vec()))
     }
 
-    /// Embed an audio file into CLAP space (512-dim, normalized).
     pub fn embed_audio(&mut self, path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
         let samples = self.load_audio_mono_48k(path)?;
 
@@ -126,7 +154,7 @@ impl ClapEngine {
 
         let value = outputs.iter().next().map(|(_, v)| v).ok_or("No output")?;
         let (_shape, data) = value.try_extract_tensor::<f32>()?;
-        Ok(Self::normalize(&data.to_vec()))
+        Ok(normalize(&data.to_vec()))
     }
 
     fn load_audio_mono_48k(&self, path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -179,7 +207,6 @@ impl ClapEngine {
             return Err("Invalid WAV".into());
         }
 
-        // Decode to f32
         let all_samples: Vec<f32> = match bits_per_sample {
             16 => data_bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect(),
             24 => data_bytes.chunks_exact(3).map(|b| {
@@ -190,7 +217,6 @@ impl ClapEngine {
             _ => data_bytes.iter().map(|&b| (b as f32 - 128.0) / 128.0).collect(),
         };
 
-        // Mix to mono
         let mono: Vec<f32> = if num_channels > 1 {
             let nc = num_channels as usize;
             all_samples.chunks(nc).map(|f| f.iter().sum::<f32>() / nc as f32).collect()
@@ -198,51 +224,15 @@ impl ClapEngine {
             all_samples
         };
 
-        // Resample to 48kHz if needed
         if sample_rate as usize == SAMPLE_RATE {
             Ok(mono)
         } else {
-            self.resample(&mono, sample_rate as usize, SAMPLE_RATE)
+            resample(&mono, sample_rate as usize, SAMPLE_RATE)
         }
     }
 
-    fn resample(&self, input: &[f32], from_rate: usize, to_rate: usize) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        let params = SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: WindowFunction::BlackmanHarris2,
-        };
-
-        let chunk_size = 1024;
-        let mut resampler = SincFixedIn::<f32>::new(
-            to_rate as f64 / from_rate as f64,
-            2.0,
-            params,
-            chunk_size,
-            1,
-        )?;
-
-        let mut output = Vec::new();
-        let mut pos = 0;
-        while pos < input.len() {
-            let end = (pos + chunk_size).min(input.len());
-            let mut chunk = input[pos..end].to_vec();
-            if chunk.len() < chunk_size { chunk.resize(chunk_size, 0.0); }
-            let result = resampler.process(&[&chunk], None)?;
-            output.extend_from_slice(&result[0]);
-            pos += chunk_size;
-        }
-
-        let expected = (input.len() as f64 * to_rate as f64 / from_rate as f64) as usize;
-        output.truncate(expected);
-        Ok(output)
-    }
-
-    fn compute_mel_spectrogram(&self, samples: &[f32]) -> Vec<f32> {
-        let mut planner = self.fft_planner.lock().unwrap();
-        let fft = planner.plan_fft_forward(N_FFT);
+    fn compute_mel_spectrogram(&mut self, samples: &[f32]) -> Vec<f32> {
+        let fft = self.fft_planner.plan_fft_forward(N_FFT);
 
         let window: Vec<f32> = (0..N_FFT)
             .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / N_FFT as f32).cos()))
@@ -265,47 +255,249 @@ impl ClapEngine {
             let power: Vec<f32> = fft_input[..N_FFT / 2 + 1].iter().map(|c| c.norm_sqr()).collect();
 
             for mel_bin in 0..N_MELS {
-                let energy: f32 = power.iter().zip(self.mel_filterbank[mel_bin].iter()).map(|(p, f)| p * f).sum();
+                let energy: f32 = power.iter().zip(self.shared.mel_filterbank[mel_bin].iter()).map(|(p, f)| p * f).sum();
                 mel_spec.push((energy + 1e-10).log10());
             }
         }
 
         mel_spec
     }
+}
 
-    fn create_mel_filterbank() -> Vec<Vec<f32>> {
-        let n_freqs = N_FFT / 2 + 1;
-        let hz_to_mel = |f: f32| -> f32 { 2595.0 * (1.0 + f / 700.0).log10() };
-        let mel_to_hz = |m: f32| -> f32 { 700.0 * (10.0_f32.powf(m / 2595.0) - 1.0) };
+fn resample(input: &[f32], from_rate: usize, to_rate: usize) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let params = SincInterpolationParameters {
+        sinc_len: 256,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 256,
+        window: WindowFunction::BlackmanHarris2,
+    };
 
-        let mel_min = hz_to_mel(MEL_FMIN);
-        let mel_max = hz_to_mel(MEL_FMAX);
-        let mel_points: Vec<f32> = (0..N_MELS + 2)
-            .map(|i| mel_min + (mel_max - mel_min) * i as f32 / (N_MELS + 1) as f32)
-            .collect();
-        let hz_points: Vec<f32> = mel_points.iter().map(|&m| mel_to_hz(m)).collect();
-        let freq_bins: Vec<f32> = (0..n_freqs).map(|i| i as f32 * SAMPLE_RATE as f32 / N_FFT as f32).collect();
+    let chunk_size = 1024;
+    let mut resampler = SincFixedIn::<f32>::new(
+        to_rate as f64 / from_rate as f64,
+        2.0,
+        params,
+        chunk_size,
+        1,
+    )?;
 
-        (0..N_MELS).map(|m| {
-            let (fl, fc, fr) = (hz_points[m], hz_points[m + 1], hz_points[m + 2]);
-            let filter: Vec<f32> = freq_bins.iter().map(|&f| {
-                if f >= fl && f <= fc {
-                    if fc == fl { 0.0 } else { (f - fl) / (fc - fl) }
-                } else if f > fc && f <= fr {
-                    if fr == fc { 0.0 } else { (fr - f) / (fr - fc) }
-                } else { 0.0 }
-            }).collect();
-            let area = 2.0 / (hz_points[m + 2] - hz_points[m]);
-            filter.iter().map(|&v| v * area).collect()
-        }).collect()
+    let mut output = Vec::new();
+    let mut pos = 0;
+    while pos < input.len() {
+        let end = (pos + chunk_size).min(input.len());
+        let mut chunk = input[pos..end].to_vec();
+        if chunk.len() < chunk_size { chunk.resize(chunk_size, 0.0); }
+        let result = resampler.process(&[&chunk], None)?;
+        output.extend_from_slice(&result[0]);
+        pos += chunk_size;
     }
 
-    fn normalize(v: &[f32]) -> Vec<f32> {
-        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm > 0.0 { v.iter().map(|x| x / norm).collect() } else { v.to_vec() }
-    }
+    let expected = (input.len() as f64 * to_rate as f64 / from_rate as f64) as usize;
+    output.truncate(expected);
+    Ok(output)
+}
+
+fn create_mel_filterbank() -> Vec<Vec<f32>> {
+    let n_freqs = N_FFT / 2 + 1;
+    let hz_to_mel = |f: f32| -> f32 { 2595.0 * (1.0 + f / 700.0).log10() };
+    let mel_to_hz = |m: f32| -> f32 { 700.0 * (10.0_f32.powf(m / 2595.0) - 1.0) };
+
+    let mel_min = hz_to_mel(MEL_FMIN);
+    let mel_max = hz_to_mel(MEL_FMAX);
+    let mel_points: Vec<f32> = (0..N_MELS + 2)
+        .map(|i| mel_min + (mel_max - mel_min) * i as f32 / (N_MELS + 1) as f32)
+        .collect();
+    let hz_points: Vec<f32> = mel_points.iter().map(|&m| mel_to_hz(m)).collect();
+    let freq_bins: Vec<f32> = (0..n_freqs).map(|i| i as f32 * SAMPLE_RATE as f32 / N_FFT as f32).collect();
+
+    (0..N_MELS).map(|m| {
+        let (fl, fc, fr) = (hz_points[m], hz_points[m + 1], hz_points[m + 2]);
+        let filter: Vec<f32> = freq_bins.iter().map(|&f| {
+            if f >= fl && f <= fc {
+                if fc == fl { 0.0 } else { (f - fl) / (fc - fl) }
+            } else if f > fc && f <= fr {
+                if fr == fc { 0.0 } else { (fr - f) / (fr - fc) }
+            } else { 0.0 }
+        }).collect();
+        let area = 2.0 / (hz_points[m + 2] - hz_points[m]);
+        filter.iter().map(|&v| v * area).collect()
+    }).collect()
+}
+
+fn normalize(v: &[f32]) -> Vec<f32> {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 { v.iter().map(|x| x / norm).collect() } else { v.to_vec() }
 }
 
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+// ======================================================================
+// Pool
+// ======================================================================
+
+/// Embedding result produced by an audio worker.
+pub struct EmbedResult {
+    pub path: String,
+    pub embedding: Vec<f32>, // empty on failure
+}
+
+/// Pool of N audio-embedding workers plus one text-query worker.
+pub struct ClapPool {
+    #[allow(dead_code)]
+    shared: Arc<ClapShared>,
+    audio_workers: usize,
+    job_tx: Option<Sender<String>>,
+    worker_handles: Vec<JoinHandle<()>>,
+    /// Completion channel. Background orchestrator drains this.
+    result_rx: Option<Receiver<EmbedResult>>,
+    /// Single-threaded worker dedicated to low-latency text queries from search.
+    text_worker: Mutex<ClapWorker>,
+}
+
+impl ClapPool {
+    /// Size the pool automatically based on CPU count and available RAM.
+    /// Leaves headroom for the UI, search, and OS.
+    pub fn new(cache_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let shared = ClapShared::new(cache_dir)?;
+
+        let logical = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+
+        // Use up to half of system RAM for model weights. On 32GB that's 16GB,
+        // far more than needed. On 8GB it's 4GB — still room for ~16 workers
+        // so the logical-cpu cap wins. On 4GB it would cap at ~8.
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        let total_ram = sys.total_memory(); // bytes
+        let ram_budget = total_ram / 2;
+        let ram_cap = (ram_budget / APPROX_BYTES_PER_WORKER).max(1) as usize;
+
+        // Reserve ~4 threads for UI/search/OS. Cap at ram_cap. Always at least 2.
+        let audio_workers = logical.saturating_sub(4).max(2).min(ram_cap).max(1);
+
+        // Each ONNX session's internal thread pool. Keep small so N workers don't
+        // oversubscribe. Roughly: audio_workers * intra_threads ≈ logical.
+        let intra_threads = (logical / audio_workers).max(1).min(4);
+
+        eprintln!(
+            "CLAP pool: {} audio workers x {} intra threads (logical={}, ram_cap={})",
+            audio_workers, intra_threads, logical, ram_cap
+        );
+
+        // Audio-embedding pipeline. crossbeam-channel is MPMC: every worker
+        // can hold its own Receiver clone and call recv() concurrently without
+        // any shared mutex — unlike std::sync::mpsc, which is SPMC and requires
+        // serializing receivers through a Mutex (that's a deadlock trap: a
+        // worker holds the lock across recv()'s block, serializing all workers).
+        let (job_tx, job_rx) = unbounded::<String>();
+        let (result_tx, result_rx) = unbounded::<EmbedResult>();
+
+        let mut worker_handles = Vec::with_capacity(audio_workers);
+        for worker_id in 0..audio_workers {
+            let shared_w = Arc::clone(&shared);
+            let job_rx = job_rx.clone();
+            let result_tx = result_tx.clone();
+            let handle = thread::Builder::new()
+                .name(format!("clap-audio-{}", worker_id))
+                .spawn(move || {
+                    let mut worker = match ClapWorker::new(shared_w, intra_threads) {
+                        Ok(w) => w,
+                        Err(e) => {
+                            eprintln!("ClapWorker {} failed to init: {}", worker_id, e);
+                            return;
+                        }
+                    };
+                    while let Ok(path) = job_rx.recv() {
+                        let embedding = match worker.embed_audio(&path) {
+                            Ok(emb) => emb,
+                            Err(e) => {
+                                eprintln!("Failed to embed {}: {}", path, e);
+                                Vec::new()
+                            }
+                        };
+                        if result_tx.send(EmbedResult { path, embedding }).is_err() {
+                            break; // orchestrator dropped the receiver
+                        }
+                    }
+                })?;
+            worker_handles.push(handle);
+        }
+        // Drop the pool's own job_rx clone so the channel closes cleanly once
+        // `job_tx` is dropped (on pool shutdown). Workers still hold their
+        // individual clones.
+        drop(job_rx);
+        // Drop our result_tx clone so result_rx returns Err once every worker
+        // has exited (not on every normal embedding completion).
+        drop(result_tx);
+
+        // Dedicated text worker for user search queries. Small intra-threads
+        // budget since it's only used occasionally.
+        let text_worker = ClapWorker::new(Arc::clone(&shared), 2)?;
+
+        Ok(Self {
+            shared,
+            audio_workers,
+            job_tx: Some(job_tx),
+            worker_handles,
+            result_rx: Some(result_rx),
+            text_worker: Mutex::new(text_worker),
+        })
+    }
+
+    pub fn worker_count(&self) -> usize {
+        self.audio_workers
+    }
+
+    /// Submit a path for audio embedding. Non-blocking (bounded only by OS pipe).
+    pub fn submit(&self, path: String) -> Result<(), Box<dyn std::error::Error>> {
+        self.job_tx.as_ref().ok_or("pool shut down")?.send(path)?;
+        Ok(())
+    }
+
+    /// Clone of the submit channel so a caller can enqueue jobs without
+    /// holding the pool mutex. Returns None after the pool has been shut down.
+    pub fn submitter(&self) -> Option<Sender<String>> {
+        self.job_tx.clone()
+    }
+
+    /// Take the completion receiver out of the pool. The caller (orchestrator
+    /// thread) drains it until all submitted jobs have completed. Only one
+    /// consumer is supported; calling this twice returns None.
+    pub fn take_receiver(&mut self) -> Option<Receiver<EmbedResult>> {
+        self.result_rx.take()
+    }
+
+    /// Called after the orchestrator drains the receiver, to put it back so a
+    /// subsequent embedding run can reuse the same pool.
+    pub fn return_receiver(&mut self, rx: Receiver<EmbedResult>) {
+        self.result_rx = Some(rx);
+    }
+
+    /// Low-latency text embedding for search queries. Runs on the dedicated
+    /// text worker so it doesn't contend with bulk audio embedding.
+    pub fn embed_text(&self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        let mut w = self.text_worker.lock().map_err(|e| e.to_string())?;
+        w.embed_text(text)
+    }
+
+    /// Non-blocking variant used by search so a long-running text query can't
+    /// freeze the UI. Returns None if the text worker is currently busy.
+    pub fn try_embed_text(&self, text: &str) -> Option<Vec<f32>> {
+        match self.text_worker.try_lock() {
+            Ok(mut w) => w.embed_text(text).ok(),
+            Err(_) => None,
+        }
+    }
+}
+
+impl Drop for ClapPool {
+    fn drop(&mut self) {
+        // Close the job channel so workers exit their recv loops.
+        drop(self.job_tx.take());
+        for h in self.worker_handles.drain(..) {
+            let _ = h.join();
+        }
+    }
 }

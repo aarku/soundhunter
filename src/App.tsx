@@ -611,6 +611,7 @@ function App() {
                 size="sm"
                 className="w-full"
                 onClick={handleAddFolder}
+                data-testid="add-folder"
               >
                 <Plus className="w-3 h-3 mr-1" />
                 Add Folder
@@ -623,6 +624,7 @@ function App() {
                   className="w-full"
                   onClick={handleRescan}
                   disabled={isScanning}
+                  data-testid="rescan"
                 >
                   {isScanning ? (
                     <Loader2 className="w-3 h-3 mr-1 animate-spin" />
@@ -660,7 +662,10 @@ function App() {
                 {stats.total_files} files in {stats.total_folders} folders
               </div>
               {embeddingProgress && (
-                <div className="text-xs text-primary flex items-center gap-1">
+                <div
+                  className="text-xs text-primary flex items-center gap-1"
+                  data-testid="embedding-progress"
+                >
                   <Loader2 className="w-3 h-3 animate-spin" />
                   {embeddingProgress}
                 </div>
@@ -777,6 +782,7 @@ function App() {
             placeholder="Search sounds... (semantic + fuzzy)"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            data-testid="search-input"
             className="border-0 shadow-none focus-visible:ring-0 h-8 text-sm"
           />
           {isSearching && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
