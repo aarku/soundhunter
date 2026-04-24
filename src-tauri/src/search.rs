@@ -117,6 +117,13 @@ impl SearchEngine {
         Ok(())
     }
 
+    /// Update just the semantic-search embedding arrays without touching the tantivy index.
+    /// Cheap — safe to call frequently during background embedding.
+    pub fn set_embeddings(&mut self, audio_paths: Vec<String>, audio_embeddings: Vec<Vec<f32>>) {
+        self.file_paths = audio_paths;
+        self.embeddings = audio_embeddings;
+    }
+
     pub fn search(
         &self,
         query_str: &str,

@@ -5,8 +5,13 @@ mod state;
 
 use clap::ClapEngine;
 use state::AppState;
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use tauri::Manager;
+
+/// Guard ensuring only one embedding background thread runs at a time.
+/// Wrapped in a named struct so it can be retrieved from Tauri state.
+pub struct EmbeddingRunning(pub AtomicBool);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -25,6 +30,7 @@ pub fn run() {
             app.manage(Mutex::new(app_state));
             // ClapEngine managed separately so embedding doesn't block everything
             app.manage(Mutex::new(None::<ClapEngine>));
+            app.manage(EmbeddingRunning(AtomicBool::new(false)));
             app.manage(data_dir);
             Ok(())
         })
@@ -248,54 +254,90 @@ mod commands {
     /// Spawn a background thread to embed all unprocessed audio files.
     /// Emits "embedding-progress" events with { done, total } and
     /// "embedding-complete" when finished.
+    ///
+    /// Returns immediately — all folder walking and WAV parsing happens on the
+    /// background thread so the Tauri command thread and AppState lock stay free.
     #[tauri::command]
     pub fn start_embedding(
         app: tauri::AppHandle,
         state: State<'_, Mutex<AppState>>,
         clap_state: State<'_, Mutex<Option<super::clap::ClapEngine>>>,
+        running: State<'_, super::EmbeddingRunning>,
         data_dir: State<'_, std::path::PathBuf>,
     ) -> Result<(), String> {
-        // Collect all paths needing embedding (quick lock)
-        let paths_to_embed: Vec<String> = {
-            let s = state.lock().map_err(|e| e.to_string())?;
-            let mut paths = Vec::new();
-            for folder in &s.get_folders() {
-                let files = super::scanner::scan_folder(folder);
-                for f in files {
-                    if s.next_unembedded_path_check(&f.path) {
-                        paths.push(f.path);
-                    }
-                }
-            }
-            paths
-        };
+        use std::sync::atomic::Ordering;
 
-        if paths_to_embed.is_empty() {
-            let _ = app.emit("embedding-complete", ());
+        // If an embedding run is already in progress, this is a no-op. Prevents
+        // overlapping runs (e.g. startup auto-start + user rescan) from emitting
+        // conflicting {done,total} progress events.
+        if running
+            .0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Ok(());
         }
 
-        // Ensure CLAP is initialized before spawning thread
+        // Cheap snapshots under a brief lock. No disk I/O here.
+        let (folders, already_embedded) = {
+            let s = state.lock().map_err(|e| {
+                running.0.store(false, Ordering::Release);
+                e.to_string()
+            })?;
+            (s.get_folders(), s.embedded_paths_snapshot())
+        };
+
+        // Ensure CLAP is initialized before spawning thread. This can take
+        // a while on first run (downloads models), but subsequent runs are fast.
         {
-            let mut clap_lock = clap_state.lock().map_err(|e| e.to_string())?;
+            let mut clap_lock = clap_state.lock().map_err(|e| {
+                running.0.store(false, Ordering::Release);
+                e.to_string()
+            })?;
             if clap_lock.is_none() {
                 eprintln!("Initializing CLAP engine...");
-                *clap_lock = Some(
-                    super::clap::ClapEngine::new(&data_dir)
-                        .map_err(|e| e.to_string())?,
-                );
+                match super::clap::ClapEngine::new(&data_dir) {
+                    Ok(engine) => *clap_lock = Some(engine),
+                    Err(e) => {
+                        running.0.store(false, Ordering::Release);
+                        return Err(e.to_string());
+                    }
+                }
                 eprintln!("CLAP engine ready.");
             }
         }
 
-        let total = paths_to_embed.len();
         let app_handle = app.clone();
 
         std::thread::spawn(move || {
+            let running_ref = app_handle.state::<super::EmbeddingRunning>();
+
+            // Walk folders off the main thread. For 18k+ files this can take
+            // tens of seconds — doing it here keeps AppState unlocked for
+            // search, stats, etc. during the walk.
+            let mut paths_to_embed: Vec<String> = Vec::new();
+            for folder in &folders {
+                for f in super::scanner::scan_folder(folder) {
+                    if !already_embedded.contains(&f.path) {
+                        paths_to_embed.push(f.path);
+                    }
+                }
+            }
+
+            if paths_to_embed.is_empty() {
+                running_ref.0.store(false, Ordering::Release);
+                let _ = app_handle.emit("embedding-complete", serde_json::json!({ "total": 0 }));
+                return;
+            }
+
+            let total = paths_to_embed.len();
             let state_ref = app_handle.state::<Mutex<AppState>>();
             let clap_ref = app_handle.state::<Mutex<Option<super::clap::ClapEngine>>>();
 
             let mut done = 0;
+            let mut since_persist = 0;
+            let mut since_refresh = 0;
+
             for path in &paths_to_embed {
                 let embedding = {
                     let mut clap_lock = clap_ref.lock().unwrap();
@@ -311,25 +353,42 @@ mod commands {
 
                 {
                     let mut s = state_ref.lock().unwrap();
-                    let _ = s.store_embedding(path.clone(), embedding);
+                    s.store_embedding(path.clone(), embedding);
                 }
 
                 done += 1;
+                since_persist += 1;
+                since_refresh += 1;
+
                 let _ = app_handle.emit("embedding-progress", serde_json::json!({
                     "done": done,
                     "total": total,
                 }));
 
-                if done % 20 == 0 {
+                // Make newly-embedded files searchable semantically every 100 files.
+                // This is now cheap (no tantivy reindex, no folder walk).
+                if since_refresh >= 100 {
                     let mut s = state_ref.lock().unwrap();
                     let _ = s.refresh_embeddings();
+                    since_refresh = 0;
+                }
+
+                // Persist embedding cache to disk every 200 files. The cache can be
+                // tens of MB at 18k files; rewriting on every file was the main O(N^2)
+                // cost. 200 limits worst-case loss to 200 files of work on a crash.
+                if since_persist >= 200 {
+                    let s = state_ref.lock().unwrap();
+                    let _ = s.persist_embedding_cache();
+                    since_persist = 0;
                 }
             }
 
             {
                 let mut s = state_ref.lock().unwrap();
                 let _ = s.refresh_embeddings();
+                let _ = s.persist_embedding_cache();
             }
+            running_ref.0.store(false, Ordering::Release);
             let _ = app_handle.emit("embedding-complete", serde_json::json!({ "total": done }));
             eprintln!("Embedding complete: {} files", done);
         });

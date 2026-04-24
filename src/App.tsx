@@ -46,6 +46,7 @@ import { Waveform } from "@/components/Waveform";
 import { useAudioPreview } from "@/hooks/useAudioPreview";
 import * as api from "@/hooks/useTauri";
 import type { SearchResult, Playlist } from "@/hooks/useTauri";
+import { useConfirm } from "@/hooks/useConfirm";
 
 function SortablePlaylistItem({
   item,
@@ -263,6 +264,7 @@ function App() {
   const [newPlaylistName, setNewPlaylistName] = useState("");
 
   const { play, stop, seek, currentlyPlaying, progress } = useAudioPreview();
+  const confirm = useConfirm();
   const searchTimeoutRef = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
@@ -290,22 +292,39 @@ function App() {
     setDraggedItem(event.active.id as string);
   }, []);
 
-  // Listen for embedding progress events from background thread
+  // Keep a ref so the event handler always sees the latest showToast without
+  // re-subscribing (re-subscribing on every render causes duplicate listeners
+  // under StrictMode, which makes the progress counter jitter).
+  const showToastRef = useRef(showToast);
+  useEffect(() => { showToastRef.current = showToast; }, [showToast]);
+
+  // Listen for embedding progress events from background thread. Subscribe once.
   useEffect(() => {
-    const unlisten1 = listen<{ done: number; total: number }>("embedding-progress", (event) => {
+    let cancelled = false;
+    let off1: (() => void) | undefined;
+    let off2: (() => void) | undefined;
+
+    listen<{ done: number; total: number }>("embedding-progress", (event) => {
       setEmbeddingProgress(`Analyzing audio ${event.payload.done}/${event.payload.total}...`);
+    }).then((f) => {
+      if (cancelled) f(); else off1 = f;
     });
-    const unlisten2 = listen<{ total: number }>("embedding-complete", (event) => {
+
+    listen<{ total: number }>("embedding-complete", (event) => {
       setEmbeddingProgress(null);
       if (event.payload.total > 0) {
-        showToast(`Analyzed ${event.payload.total} audio files for semantic search`);
+        showToastRef.current(`Analyzed ${event.payload.total} audio files for semantic search`);
       }
+    }).then((f) => {
+      if (cancelled) f(); else off2 = f;
     });
+
     return () => {
-      unlisten1.then((f) => f());
-      unlisten2.then((f) => f());
+      cancelled = true;
+      off1?.();
+      off2?.();
     };
-  }, [showToast]);
+  }, []);
 
   // Load initial data + resume background embedding if needed
   useEffect(() => {
@@ -365,11 +384,20 @@ function App() {
   }, []);
 
   const handleRemoveFolder = useCallback(async (path: string) => {
+    const name = path.split(/[/\\]/).pop() || path;
+    const ok = await confirm({
+      title: `Remove "${name}" from index?`,
+      description:
+        "Indexed files from this folder will no longer appear in search. The files on disk are not touched.",
+      confirmLabel: "Remove",
+      destructive: true,
+    });
+    if (!ok) return;
     const newFolders = await api.removeFolder(path);
     setFolders(newFolders);
     const s = await api.getStats();
     setStats(s);
-  }, []);
+  }, [confirm]);
 
   const handleRescan = useCallback(async () => {
     setIsScanning(true);
@@ -400,11 +428,24 @@ function App() {
   }, []);
 
   const handleDeletePlaylist = useCallback(async (id: string) => {
+    const pl = playlists.find((p) => p.id === id);
+    const name = pl?.name ?? "this list";
+    const count = pl?.items.length ?? 0;
+    const ok = await confirm({
+      title: `Delete "${name}"?`,
+      description:
+        count > 0
+          ? `This will permanently delete the list and its ${count} item${count === 1 ? "" : "s"}. This cannot be undone.`
+          : "This will permanently delete the list. This cannot be undone.",
+      confirmLabel: "Delete list",
+      destructive: true,
+    });
+    if (!ok) return;
     const pls = await api.deletePlaylist(id);
     setPlaylists(pls);
     setOpenPlaylists((prev) => { const s = new Set(prev); s.delete(id); return s; });
     setPlaylistItemsMap((prev) => { const m = new Map(prev); m.delete(id); return m; });
-  }, []);
+  }, [playlists, confirm]);
 
   const handleSelectPlaylist = useCallback(async (id: string) => {
     setOpenPlaylists((prev) => {
@@ -427,11 +468,19 @@ function App() {
   }, [openPlaylists, refreshPlaylistItems]);
 
   const handleRemoveFromPlaylist = useCallback(async (playlistId: string, filePath: string) => {
+    const name = filePath.split(/[/\\]/).pop() || filePath;
+    const ok = await confirm({
+      title: "Remove from list?",
+      description: `"${name}" will be removed from this list. The file on disk is not touched.`,
+      confirmLabel: "Remove",
+      destructive: true,
+    });
+    if (!ok) return;
     await api.removeFromPlaylist(playlistId, filePath);
     const pls = await api.getPlaylists();
     setPlaylists(pls);
     refreshPlaylistItems(playlistId);
-  }, [refreshPlaylistItems]);
+  }, [confirm, refreshPlaylistItems]);
 
   const handleRenamePlaylist = useCallback(async (id: string, name: string) => {
     const pls = await api.renamePlaylist(id, name);

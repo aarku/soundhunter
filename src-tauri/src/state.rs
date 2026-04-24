@@ -153,50 +153,36 @@ impl AppState {
         Ok(count)
     }
 
-    /// Get the next file path that hasn't been embedded yet. Quick operation.
-    /// Check if a specific path needs embedding.
-    pub fn next_unembedded_path_check(&self, path: &str) -> bool {
-        !self.embedding_cache.embeddings.contains_key(path)
+    /// Snapshot of which paths are already embedded. Used by the background
+    /// embedder to collect work outside the state lock.
+    pub fn embedded_paths_snapshot(&self) -> std::collections::HashSet<String> {
+        self.embedding_cache.embeddings.keys().cloned().collect()
     }
 
-    /// Store an embedding result and return the count of remaining unembedded files.
-    pub fn store_embedding(&mut self, path: String, embedding: Vec<f32>) -> Result<usize, Box<dyn std::error::Error>> {
+    /// Store an embedding in memory only. Persist is deferred — call
+    /// `persist_embedding_cache` periodically from the caller.
+    pub fn store_embedding(&mut self, path: String, embedding: Vec<f32>) {
         self.embedding_cache.embeddings.insert(path, embedding);
-        self.save_embedding_cache()?;
-
-        // Count remaining
-        let mut remaining = 0;
-        for folder in &self.folders {
-            let files = scanner::scan_folder(folder);
-            for f in files {
-                if !self.embedding_cache.embeddings.contains_key(&f.path) {
-                    remaining += 1;
-                }
-            }
-        }
-        Ok(remaining)
     }
 
-    /// Refresh search engine with latest embeddings from cache.
-    pub fn refresh_embeddings(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut all_files = Vec::new();
-        for folder in &self.folders {
-            let files = scanner::scan_folder(folder);
-            all_files.extend(files);
-        }
+    /// Flush the in-memory embedding cache to disk.
+    pub fn persist_embedding_cache(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.save_embedding_cache()
+    }
 
-        let mut audio_embeddings: Vec<Vec<f32>> = Vec::new();
-        let mut audio_paths: Vec<String> = Vec::new();
-        for file in &all_files {
-            if let Some(emb) = self.embedding_cache.embeddings.get(&file.path) {
-                if !emb.is_empty() {
-                    audio_paths.push(file.path.clone());
-                    audio_embeddings.push(emb.clone());
-                }
+    /// Push the current embedding cache into the search engine's semantic-search
+    /// arrays. Does NOT touch the tantivy keyword index, so this is cheap and
+    /// safe to call frequently during background embedding.
+    pub fn refresh_embeddings(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut audio_paths: Vec<String> = Vec::with_capacity(self.embedding_cache.embeddings.len());
+        let mut audio_embeddings: Vec<Vec<f32>> = Vec::with_capacity(self.embedding_cache.embeddings.len());
+        for (path, emb) in &self.embedding_cache.embeddings {
+            if !emb.is_empty() {
+                audio_paths.push(path.clone());
+                audio_embeddings.push(emb.clone());
             }
         }
-
-        self.search_engine.reindex(&all_files, &audio_paths, &audio_embeddings)?;
+        self.search_engine.set_embeddings(audio_paths, audio_embeddings);
         Ok(())
     }
 
