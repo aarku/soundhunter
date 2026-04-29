@@ -12,12 +12,15 @@ import {
   ExternalLink,
   ListPlus,
   Plus,
-  Trash2,
   ChevronRight,
   ChevronDown,
   Music,
   Star,
   GripVertical,
+  MoreVertical,
+  Copy,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
@@ -43,10 +46,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Waveform } from "@/components/Waveform";
+import { ActivityBar } from "@/components/ActivityBar";
+import { useActivity } from "@/hooks/useActivity";
 import { useAudioPreview } from "@/hooks/useAudioPreview";
 import * as api from "@/hooks/useTauri";
-import type { SearchResult, Playlist } from "@/hooks/useTauri";
+import type { SearchResult, Playlist, CopyResult } from "@/hooks/useTauri";
 import { useConfirm } from "@/hooks/useConfirm";
+import { CopyResultDialog, type CopyResultDialogPayload } from "@/components/CopyResultDialog";
+import { CopyOptionsDialog, type CopyOptionsRequest } from "@/components/CopyOptionsDialog";
 
 function SortablePlaylistItem({
   item,
@@ -114,6 +121,7 @@ function SortablePlaylistHeader({
   onSelect,
   onDelete,
   onRename,
+  onCopyAll,
   children,
 }: {
   playlist: { id: string; name: string; items: string[] };
@@ -121,6 +129,7 @@ function SortablePlaylistHeader({
   onSelect: () => void;
   onDelete: () => void;
   onRename: (name: string) => void;
+  onCopyAll: () => void;
   children?: React.ReactNode;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -144,6 +153,11 @@ function SortablePlaylistHeader({
       onRename(editName.trim());
     }
     setIsEditing(false);
+  };
+
+  const startRename = () => {
+    setEditName(playlist.name);
+    setIsEditing(true);
   };
 
   return (
@@ -187,23 +201,54 @@ function SortablePlaylistHeader({
             className="truncate flex-1"
             onDoubleClick={(e) => {
               e.stopPropagation();
-              setEditName(playlist.name);
-              setIsEditing(true);
+              startRename();
             }}
           >
             {playlist.name}
           </span>
         )}
         <span className="text-muted-foreground">{playlist.items.length}</span>
-        <button
-          className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-          }}
-        >
-          <Trash2 className="w-3 h-3" />
-        </button>
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <button
+              className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground data-[state=open]:opacity-100"
+              onClick={(e) => e.stopPropagation()}
+              title="More actions"
+            >
+              <MoreVertical className="w-3 h-3" />
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content
+              className="bg-popover border border-border rounded-md shadow-lg py-1 z-50 min-w-48"
+              sideOffset={4}
+              align="end"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <DropdownMenu.Item
+                className="w-full px-3 py-1.5 text-left text-sm hover:bg-accent flex items-center gap-2 cursor-pointer outline-none data-highlighted:bg-accent"
+                onSelect={onCopyAll}
+              >
+                <Copy className="w-3 h-3" />
+                Copy all sounds to…
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                className="w-full px-3 py-1.5 text-left text-sm hover:bg-accent flex items-center gap-2 cursor-pointer outline-none data-highlighted:bg-accent"
+                onSelect={startRename}
+              >
+                <Pencil className="w-3 h-3" />
+                Rename
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                className="w-full px-3 py-1.5 text-left text-sm hover:bg-accent flex items-center gap-2 cursor-pointer outline-none text-destructive data-highlighted:bg-accent"
+                onSelect={onDelete}
+              >
+                <Trash2 className="w-3 h-3" />
+                Delete
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
       </div>
       {children}
     </div>
@@ -265,6 +310,7 @@ function App() {
 
   const { play, stop, seek, currentlyPlaying, progress } = useAudioPreview();
   const confirm = useConfirm();
+  const activity = useActivity();
   const searchTimeoutRef = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [draggedItem, setDraggedItem] = useState<string | null>(null);
@@ -273,6 +319,11 @@ function App() {
   const toastTimeoutRef = useRef<number | null>(null);
 
   const [embeddingProgress, setEmbeddingProgress] = useState<string | null>(null);
+  const [copyResultPayload, setCopyResultPayload] = useState<CopyResultDialogPayload | null>(null);
+  const [copyOptionsRequest, setCopyOptionsRequest] = useState<CopyOptionsRequest | null>(null);
+  // Per-copy totals so we can show "X of N" on completion — the event payload
+  // carries only the result, not the original total.
+  const copyTotalsRef = useRef<Map<string, { total: number; destLabel: string }>>(new Map());
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -299,19 +350,31 @@ function App() {
   useEffect(() => { showToastRef.current = showToast; }, [showToast]);
 
   // Listen for embedding progress events from background thread. Subscribe once.
+  const activityRef = useRef(activity);
+  useEffect(() => { activityRef.current = activity; }, [activity]);
+
   useEffect(() => {
     let cancelled = false;
     let off1: (() => void) | undefined;
     let off2: (() => void) | undefined;
+    const ACTIVITY_ID = "embedding";
 
     listen<{ done: number; total: number }>("embedding-progress", (event) => {
-      setEmbeddingProgress(`Analyzing audio ${event.payload.done}/${event.payload.total}...`);
+      const { done, total } = event.payload;
+      const label = `Analyzing audio ${done}/${total}…`;
+      setEmbeddingProgress(label);
+      activityRef.current.start({
+        id: ACTIVITY_ID,
+        label,
+        progress: total > 0 ? done / total : undefined,
+      });
     }).then((f) => {
       if (cancelled) f(); else off1 = f;
     });
 
     listen<{ total: number }>("embedding-complete", (event) => {
       setEmbeddingProgress(null);
+      activityRef.current.end(ACTIVITY_ID);
       if (event.payload.total > 0) {
         showToastRef.current(`Analyzed ${event.payload.total} audio files for semantic search`);
       }
@@ -323,6 +386,70 @@ function App() {
       cancelled = true;
       off1?.();
       off2?.();
+    };
+  }, []);
+
+  // Listen for copy progress/complete events. Must live at App level so the
+  // copy keeps updating its activity pill even if the playlists tab is closed
+  // or the originating header component unmounts.
+  useEffect(() => {
+    let cancelled = false;
+    let offProgress: (() => void) | undefined;
+    let offComplete: (() => void) | undefined;
+
+    listen<{ copyId: string; done: number; total: number; currentFile: string }>(
+      "copy-progress",
+      (event) => {
+        const { copyId, done, total } = event.payload;
+        const activityId = `copy-${copyId}`;
+        activityRef.current.update(activityId, {
+          label: `Copying ${done}/${total} sounds…`,
+          progress: total > 0 ? done / total : undefined,
+        });
+      }
+    ).then((f) => {
+      if (cancelled) f(); else offProgress = f;
+    });
+
+    listen<{ copyId: string; result: CopyResult }>("copy-complete", (event) => {
+      const { copyId, result } = event.payload;
+      const activityId = `copy-${copyId}`;
+      activityRef.current.end(activityId);
+
+      const meta = copyTotalsRef.current.get(copyId);
+      copyTotalsRef.current.delete(copyId);
+      const total = meta?.total ?? result.copied;
+      const destLabel = meta?.destLabel ?? "";
+
+      if (result.canceled) {
+        showToastRef.current(
+          `Copy canceled. ${result.copied} of ${total} sound${total === 1 ? "" : "s"} copied.`
+        );
+        return;
+      }
+
+      const clean =
+        result.skipped.length === 0 &&
+        result.renamed.length === 0 &&
+        result.missing.length === 0 &&
+        result.errors.length === 0;
+
+      if (clean) {
+        showToastRef.current(
+          `Copied ${result.copied} sound${result.copied === 1 ? "" : "s"}${destLabel ? ` to ${destLabel}` : ""}.`
+        );
+        return;
+      }
+
+      setCopyResultPayload({ result, total, destLabel });
+    }).then((f) => {
+      if (cancelled) f(); else offComplete = f;
+    });
+
+    return () => {
+      cancelled = true;
+      offProgress?.();
+      offComplete?.();
     };
   }, []);
 
@@ -371,17 +498,19 @@ function App() {
       const newFolders = await api.addFolder(selected as string);
       setFolders(newFolders);
       setIsScanning(true);
+      activity.start({ id: "scan", label: "Scanning folders…" });
       try {
         await api.scanFolders();
         const s = await api.getStats();
         setStats(s);
       } finally {
         setIsScanning(false);
+        activity.end("scan");
       }
       // Start CLAP embedding in background
       startEmbedding();
     }
-  }, []);
+  }, [activity]);
 
   const handleRemoveFolder = useCallback(async (path: string) => {
     const name = path.split(/[/\\]/).pop() || path;
@@ -401,15 +530,17 @@ function App() {
 
   const handleRescan = useCallback(async () => {
     setIsScanning(true);
+    activity.start({ id: "scan", label: "Scanning folders…" });
     try {
       await api.scanFolders();
       const s = await api.getStats();
       setStats(s);
     } finally {
       setIsScanning(false);
+      activity.end("scan");
     }
     startEmbedding();
-  }, [startEmbedding]);
+  }, [startEmbedding, activity]);
 
   const handleReveal = useCallback((path: string) => {
     api.revealInExplorer(path).catch(console.error);
@@ -492,6 +623,144 @@ function App() {
     setPlaylists(pls);
   }, []);
 
+  const handleCopyAll = useCallback(async (playlistId: string) => {
+    const pl = playlists.find((p) => p.id === playlistId);
+    if (!pl) return;
+
+    let items = playlistItemsMap.get(playlistId);
+    if (!items) {
+      items = await api.getPlaylistItems(playlistId);
+      setPlaylistItemsMap((prev) => new Map(prev).set(playlistId, items!));
+    }
+    if (items.length === 0) {
+      showToast("List is empty.");
+      return;
+    }
+
+    const sampleFilenames = items.map((p) => p.split(/[/\\]/).pop() || p);
+    setCopyOptionsRequest({
+      playlistId,
+      playlistName: pl.name,
+      sampleFilenames,
+      initial: pl.copy_options ?? null,
+    });
+  }, [playlists, playlistItemsMap, showToast]);
+
+  const runCopyWithOptions = useCallback(async (
+    playlistId: string,
+    options: api.PlaylistCopyOptions,
+  ) => {
+    const pl = playlists.find((p) => p.id === playlistId);
+    if (!pl) return;
+    const items = playlistItemsMap.get(playlistId) ?? [];
+    if (items.length === 0) {
+      showToast("List is empty.");
+      return;
+    }
+
+    // Persist the chosen options on the playlist for next time.
+    try {
+      await api.setPlaylistCopyOptions(playlistId, options);
+      setPlaylists((prev) =>
+        prev.map((p) => (p.id === playlistId ? { ...p, copy_options: options } : p))
+      );
+    } catch (e) {
+      console.error("Failed to persist copy_options", e);
+    }
+
+    const defaultPath = pl.last_copy_dest ?? undefined;
+    const selected = await open({ directory: true, defaultPath });
+    if (!selected) return;
+    const dest = selected as string;
+
+    const destLower = dest.replace(/\\/g, "/").toLowerCase();
+    const itemsInsideDest = items.some((p) => {
+      const parent = p.replace(/\\/g, "/").split("/").slice(0, -1).join("/").toLowerCase();
+      return parent === destLower;
+    });
+    if (itemsInsideDest) {
+      const ok = await confirm({
+        title: "Destination is inside your library",
+        description:
+          "The destination is inside your library. Copying here may add duplicate files to your index.",
+        confirmLabel: "Copy anyway",
+      });
+      if (!ok) return;
+    }
+
+    let pre: api.PreflightCopyResult;
+    try {
+      pre = await api.preflightCopy(playlistId, dest);
+    } catch (e) {
+      await confirm({
+        title: "Could not prepare copy",
+        description: String(e),
+        confirmLabel: "OK",
+        cancelLabel: "OK",
+      });
+      return;
+    }
+    if (pre.availableBytes < pre.requiredBytes) {
+      const needGB = (pre.requiredBytes / 1024 / 1024 / 1024).toFixed(2);
+      const haveGB = (pre.availableBytes / 1024 / 1024 / 1024).toFixed(2);
+      await confirm({
+        title: "Not enough disk space",
+        description: `Need ${needGB} GB, only ${haveGB} GB available. Choose a different folder or free up space.`,
+        confirmLabel: "OK",
+        cancelLabel: "OK",
+      });
+      return;
+    }
+
+    try {
+      await api.setPlaylistLastCopyDest(playlistId, dest);
+      setPlaylists((prev) =>
+        prev.map((p) => (p.id === playlistId ? { ...p, last_copy_dest: dest } : p))
+      );
+    } catch (e) {
+      console.error("Failed to persist last_copy_dest", e);
+    }
+
+    // Pre-allocate the copyId and create the activity row BEFORE invoking
+    // start_copy, so progress events emitted by the Rust thread can never
+    // arrive before the row exists. (useActivity.update is a no-op for
+    // missing ids, so a race here would strand the pill at "0/N".)
+    const copyId = `cp_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const total = items.length;
+    const destName = dest.split(/[/\\]/).pop() || dest;
+    copyTotalsRef.current.set(copyId, { total, destLabel: destName });
+
+    activity.start({
+      id: `copy-${copyId}`,
+      label: `Copying 0/${total} sounds…`,
+      progress: 0,
+      onCancel: () => { api.cancelCopy(copyId).catch(console.error); },
+      cancelConfirm: {
+        title: "Cancel copy?",
+        description: "Files already copied will remain at the destination.",
+        confirmLabel: "Cancel copy",
+      },
+    });
+
+    const renamePayload: api.RenameOptions | null = options.rename
+      ? { baseName: options.baseName, pad: options.pad, start: options.start }
+      : null;
+
+    try {
+      await api.startCopy(playlistId, dest, copyId, renamePayload);
+    } catch (e) {
+      activity.end(`copy-${copyId}`);
+      copyTotalsRef.current.delete(copyId);
+      await confirm({
+        title: "Could not start copy",
+        description: String(e),
+        confirmLabel: "OK",
+        cancelLabel: "OK",
+      });
+      return;
+    }
+  }, [playlists, playlistItemsMap, confirm, showToast, activity]);
+
   const handleDragEnd = useCallback(
     async (event: DragEndEvent) => {
       setDraggedItem(null);
@@ -562,7 +831,8 @@ function App() {
       onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
     >
-    <div className="flex h-screen bg-background text-foreground overflow-hidden select-none">
+    <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden select-none">
+      <div className="flex flex-1 min-h-0">
       {/* Sidebar */}
       <div className="w-64 border-r border-border flex flex-col bg-card">
         {/* Sidebar tabs */}
@@ -631,7 +901,7 @@ function App() {
                   ) : (
                     <FolderSearch className="w-3 h-3 mr-1" />
                   )}
-                  {isScanning ? "Scanning..." : "Rescan All"}
+                  {isScanning ? "Scanning…" : "Rescan All"}
                 </Button>
               )}
 
@@ -677,7 +947,7 @@ function App() {
             <div className="p-3 space-y-2">
               <div className="flex gap-1">
                 <Input
-                  placeholder="New list name..."
+                  placeholder="New list name…"
                   value={newPlaylistName}
                   onChange={(e) => setNewPlaylistName(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleCreatePlaylist()}
@@ -709,6 +979,7 @@ function App() {
                         onSelect={() => handleSelectPlaylist(pl.id)}
                         onDelete={() => handleDeletePlaylist(pl.id)}
                         onRename={(name) => handleRenamePlaylist(pl.id, name)}
+                        onCopyAll={() => handleCopyAll(pl.id)}
                       >
                         {isOpen && items.length > 0 && (
                           <div className="ml-5 space-y-0.5 mt-1">
@@ -779,7 +1050,7 @@ function App() {
           <Search className="w-4 h-4 text-muted-foreground shrink-0" />
           <Input
             ref={searchInputRef}
-            placeholder="Search sounds... (semantic + fuzzy)"
+            placeholder="Search sounds… (semantic + fuzzy)"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             data-testid="search-input"
@@ -935,7 +1206,7 @@ function App() {
             ))}
             {hiddenPaths.size > 0 && (
               <div className="px-4 py-3 text-xs text-muted-foreground text-center">
-                ...and {hiddenPaths.size} result{hiddenPaths.size > 1 ? "s" : ""} temporarily hidden.{" "}
+                …and {hiddenPaths.size} result{hiddenPaths.size > 1 ? "s" : ""} temporarily hidden.{" "}
                 <button
                   className="text-primary hover:underline"
                   onClick={() => setHiddenPaths(new Set())}
@@ -947,7 +1218,9 @@ function App() {
           </div>
         </ScrollArea>
       </div>
+      </div>
 
+      <ActivityBar />
     </div>
 
     {/* Toast */}
@@ -956,6 +1229,21 @@ function App() {
         {toast}
       </div>
     )}
+
+    <CopyResultDialog
+      payload={copyResultPayload}
+      onClose={() => setCopyResultPayload(null)}
+    />
+
+    <CopyOptionsDialog
+      request={copyOptionsRequest}
+      onCancel={() => setCopyOptionsRequest(null)}
+      onConfirm={(options) => {
+        const req = copyOptionsRequest;
+        setCopyOptionsRequest(null);
+        if (req) runCopyWithOptions(req.playlistId, options);
+      }}
+    />
 
     <DragOverlay>
       {draggedItem && (

@@ -1,0 +1,27 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "tauri dev",
+      "type": "shell",
+      "command": "pnpm",
+      "args": ["run", "tauri", "dev"],
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "tauri",
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*",
+          "endsPattern": "App listening on|Compiled|running|webview"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    }
+  ]
+}

@@ -4,11 +4,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlaylistCopyOptions {
+    pub rename: bool,
+    #[serde(rename = "baseName", default)]
+    pub base_name: String,
+    #[serde(default)]
+    pub pad: u8,
+    #[serde(default)]
+    pub start: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Playlist {
     pub id: String,
     pub name: String,
     pub items: Vec<String>, // file paths
+    #[serde(default)]
+    pub last_copy_dest: Option<String>,
+    #[serde(default)]
+    pub copy_options: Option<PlaylistCopyOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +231,8 @@ impl AppState {
             id,
             name,
             items: Vec::new(),
+            last_copy_dest: None,
+            copy_options: None,
         });
         self.save()?;
         Ok(())
@@ -301,5 +318,39 @@ impl AppState {
         }
         self.save()?;
         Ok(())
+    }
+
+    pub fn set_playlist_last_copy_dest(
+        &mut self,
+        playlist_id: &str,
+        path: String,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(p) = self.playlists.iter_mut().find(|p| p.id == playlist_id) {
+            p.last_copy_dest = Some(path);
+        }
+        self.save()?;
+        Ok(())
+    }
+
+    pub fn set_playlist_copy_options(
+        &mut self,
+        playlist_id: &str,
+        options: Option<PlaylistCopyOptions>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(p) = self.playlists.iter_mut().find(|p| p.id == playlist_id) {
+            p.copy_options = options;
+        }
+        self.save()?;
+        Ok(())
+    }
+
+    pub fn get_playlist_copy_options(
+        &self,
+        playlist_id: &str,
+    ) -> Option<PlaylistCopyOptions> {
+        self.playlists
+            .iter()
+            .find(|p| p.id == playlist_id)
+            .and_then(|p| p.copy_options.clone())
     }
 }

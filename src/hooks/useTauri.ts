@@ -10,10 +10,50 @@ export interface SearchResult {
   duration_seconds: number;
 }
 
+export interface PlaylistCopyOptions {
+  rename: boolean;
+  baseName: string;
+  pad: number;
+  start: number;
+}
+
 export interface Playlist {
   id: string;
   name: string;
   items: string[];
+  last_copy_dest?: string | null;
+  copy_options?: PlaylistCopyOptions | null;
+}
+
+export interface RenameOptions {
+  baseName: string;
+  pad: number;
+  start: number;
+}
+
+export interface PreflightCopyResult {
+  requiredBytes: number;
+  availableBytes: number;
+  sourcePaths: string[];
+}
+
+export interface CopyRenamedEntry {
+  from: string;
+  to: string;
+}
+
+export interface CopyErrorEntry {
+  path: string;
+  message: string;
+}
+
+export interface CopyResult {
+  copied: number;
+  canceled: boolean;
+  skipped: string[];
+  renamed: CopyRenamedEntry[];
+  missing: string[];
+  errors: CopyErrorEntry[];
 }
 
 export interface Stats {
@@ -103,5 +143,45 @@ export async function refreshEmbeddings(): Promise<void> {
 
 export async function getAudioMetadata(path: string): Promise<AudioMetadata> {
   return invoke("get_audio_metadata", { path });
+}
+
+export async function preflightCopy(
+  playlistId: string,
+  dest: string
+): Promise<PreflightCopyResult> {
+  return invoke("preflight_copy", { playlistId, dest });
+}
+
+export async function startCopy(
+  playlistId: string,
+  dest: string,
+  copyId?: string,
+  rename?: RenameOptions | null
+): Promise<{ copyId: string }> {
+  return invoke("start_copy", { playlistId, dest, copyId, rename });
+}
+
+export async function cancelCopy(copyId: string): Promise<void> {
+  return invoke("cancel_copy", { copyId });
+}
+
+export async function setPlaylistLastCopyDest(
+  playlistId: string,
+  path: string
+): Promise<void> {
+  return invoke("set_playlist_last_copy_dest", { playlistId, path });
+}
+
+export async function setPlaylistCopyOptions(
+  playlistId: string,
+  options: PlaylistCopyOptions | null
+): Promise<void> {
+  return invoke("set_playlist_copy_options", { playlistId, options });
+}
+
+export async function getPlaylistCopyOptions(
+  playlistId: string
+): Promise<PlaylistCopyOptions | null> {
+  return invoke("get_playlist_copy_options", { playlistId });
 }
 

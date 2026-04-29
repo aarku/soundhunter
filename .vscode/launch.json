@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Tauri Dev",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["run", "tauri", "dev"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "windows": {
+        "runtimeExecutable": "pnpm.cmd"
+      }
+    }
+  ]
+}

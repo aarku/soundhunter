@@ -1,10 +1,12 @@
 mod clap;
+mod copy;
 mod scanner;
 mod search;
 mod state;
 
 use clap::ClapPool;
 use state::AppState;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use tauri::Manager;
@@ -42,6 +44,7 @@ pub fn run() {
             app.manage(Mutex::new(None::<ClapPool>));
             app.manage(EmbeddingRunning(AtomicBool::new(false)));
             app.manage(data_dir);
+            app.manage(copy::CancelFlags::new(HashMap::new()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -65,6 +68,12 @@ pub fn run() {
             commands::generate_waveform,
             commands::start_embedding,
             commands::refresh_embeddings,
+            commands::preflight_copy,
+            commands::start_copy,
+            commands::cancel_copy,
+            commands::set_playlist_last_copy_dest,
+            commands::set_playlist_copy_options,
+            commands::get_playlist_copy_options,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -444,5 +453,149 @@ mod commands {
     pub fn generate_waveform(path: String, bar_count: usize) -> Result<Vec<f32>, String> {
         super::scanner::generate_waveform_peaks(&path, bar_count)
             .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub fn preflight_copy(
+        state: State<'_, Mutex<AppState>>,
+        playlist_id: String,
+        dest: String,
+    ) -> Result<super::copy::PreflightResult, String> {
+        let items = {
+            let s = state.lock().map_err(|e| e.to_string())?;
+            s.get_playlist_items(&playlist_id).map_err(|e| e.to_string())?
+        };
+        let dest_path = std::path::Path::new(&dest);
+        Ok(super::copy::preflight(&items, dest_path))
+    }
+
+    #[tauri::command]
+    pub fn start_copy(
+        app: tauri::AppHandle,
+        state: State<'_, Mutex<AppState>>,
+        cancels: State<'_, super::copy::CancelFlags>,
+        playlist_id: String,
+        dest: String,
+        copy_id: Option<String>,
+        rename: Option<super::copy::RenameOptions>,
+    ) -> Result<super::copy::StartResult, String> {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let items = {
+            let s = state.lock().map_err(|e| e.to_string())?;
+            s.get_playlist_items(&playlist_id).map_err(|e| e.to_string())?
+        };
+
+        let copy_id = copy_id.unwrap_or_else(super::copy::new_copy_id);
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut m = cancels.lock().map_err(|e| e.to_string())?;
+            m.insert(copy_id.clone(), flag.clone());
+        }
+
+        let dest_path = std::path::PathBuf::from(&dest);
+        if let Err(e) = std::fs::create_dir_all(&dest_path) {
+            return Err(format!("could not create destination: {e}"));
+        }
+
+        let copy_id_thread = copy_id.clone();
+        let app_handle = app.clone();
+
+        std::thread::spawn(move || {
+            let total = items.len() as u64;
+            let _ = app_handle.emit(
+                "copy-progress",
+                serde_json::json!({
+                    "copyId": copy_id_thread,
+                    "done": 0u64,
+                    "total": total,
+                    "currentFile": "",
+                }),
+            );
+
+            let cancel_ref = app_handle.state::<super::copy::CancelFlags>();
+            let flag_for_run = flag.clone();
+
+            let app_for_progress = app_handle.clone();
+            let copy_id_for_progress = copy_id_thread.clone();
+            let result = super::copy::run_copy(
+                items,
+                &dest_path,
+                rename,
+                flag_for_run,
+                move |done, total, current| {
+                    let _ = app_for_progress.emit(
+                        "copy-progress",
+                        serde_json::json!({
+                            "copyId": copy_id_for_progress,
+                            "done": done,
+                            "total": total,
+                            "currentFile": current,
+                        }),
+                    );
+                },
+            );
+
+            {
+                if let Ok(mut m) = cancel_ref.lock() {
+                    m.remove(&copy_id_thread);
+                }
+            }
+
+            let _ = app_handle.emit(
+                "copy-complete",
+                serde_json::json!({
+                    "copyId": copy_id_thread,
+                    "result": result,
+                }),
+            );
+        });
+
+        Ok(super::copy::StartResult { copy_id })
+    }
+
+    #[tauri::command]
+    pub fn cancel_copy(
+        cancels: State<'_, super::copy::CancelFlags>,
+        copy_id: String,
+    ) -> Result<(), String> {
+        use std::sync::atomic::Ordering;
+        let m = cancels.lock().map_err(|e| e.to_string())?;
+        if let Some(flag) = m.get(&copy_id) {
+            flag.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub fn set_playlist_last_copy_dest(
+        state: State<'_, Mutex<AppState>>,
+        playlist_id: String,
+        path: String,
+    ) -> Result<(), String> {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.set_playlist_last_copy_dest(&playlist_id, path)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub fn set_playlist_copy_options(
+        state: State<'_, Mutex<AppState>>,
+        playlist_id: String,
+        options: Option<super::state::PlaylistCopyOptions>,
+    ) -> Result<(), String> {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.set_playlist_copy_options(&playlist_id, options)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    pub fn get_playlist_copy_options(
+        state: State<'_, Mutex<AppState>>,
+        playlist_id: String,
+    ) -> Result<Option<super::state::PlaylistCopyOptions>, String> {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        Ok(s.get_playlist_copy_options(&playlist_id))
     }
 }
